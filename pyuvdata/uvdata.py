@@ -409,6 +409,25 @@ class UVData(UVBase):
             warnings.warn('antenna_positions are not defined. '
                           'antenna_positions will be a required parameter in '
                           'future versions.', PendingDeprecationWarning)
+        else:
+            # check that the uvws make sense given the antenna positions
+            # first, make a copy of this object with just the metadata
+            # new_obj = UVData()
+            # for param_name in self:
+            #     if param_name not in ['data_array', 'flag_array', 'nsample_array']:
+            #         setattr(new_obj, param_name, getattr(self, param_name))
+            new_obj = copy.deepcopy(self)
+            new_obj.data_array = None
+            new_obj.flag_array = None
+            new_obj.nsample_array = None
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                new_obj.set_uvws_from_antenna_positions(allow_phasing=True, metadata_only=True)
+
+            if new_obj._uvw_array != self._uvw_array:
+                print(np.max(np.abs(new_obj.uvw_array - self.uvw_array)))
+                raise ValueError('uvw_array does not match the expected values '
+                                 'given the antenna positions.')
 
         # check auto and cross-corrs have sensible uvws
         autos = np.isclose(self.ant_1_array - self.ant_2_array, 0.0)
@@ -563,7 +582,7 @@ class UVData(UVBase):
         latitude, longitude, altitude = self.telescope_location_lat_lon_alt_degrees
         self.lst_array = uvutils.get_lst_for_time(self.time_array, latitude, longitude, altitude)
 
-    def unphase_to_drift(self, phase_frame=None, use_ant_pos=False):
+    def unphase_to_drift(self, phase_frame=None, use_ant_pos=False, metadata_only=False):
         """
         Convert from a phased dataset to a drift dataset.
         See the phasing memo under docs/references for more documentation.
@@ -575,6 +594,7 @@ class UVData(UVBase):
                 if that attribute is None
             use_ant_pos: If True, calculate the uvws directly from the
                 antenna positions rather than from the existing uvws.
+            metadata_only: If True, don't error if the data don't exist. Default is False.
         """
         if self.phase_type == 'phased':
             pass
@@ -611,7 +631,13 @@ class UVData(UVBase):
         w_lambda = (self.uvw_array[:, 2].reshape(self.Nblts, 1)
                     / const.c.to('m/s').value * self.freq_array.reshape(1, self.Nfreqs))
         phs = np.exp(-1j * 2 * np.pi * (-1) * w_lambda[:, None, :, None])
-        self.data_array *= phs
+        if self.data_array is None:
+            if metadata_only is False:
+                raise ValueError('data_array is None, so cannot be phased. '
+                                 'If you wish to operate only on the metadata, '
+                                 'set metadata_only=True')
+        else:
+            self.data_array *= phs
 
         unique_times, unique_inds = np.unique(self.time_array, return_index=True)
         for ind, jd in enumerate(unique_times):
@@ -671,7 +697,8 @@ class UVData(UVBase):
         self.phase_center_epoch = None
         self.set_drift()
 
-    def phase(self, ra, dec, epoch='J2000', phase_frame='icrs', use_ant_pos=False):
+    def phase(self, ra, dec, epoch='J2000', phase_frame='icrs', use_ant_pos=False,
+              metadata_only=False):
         """"
         Phase a drift scan dataset to a single ra/dec at a particular epoch.
         See the phasing memo under docs/references for more documentation.
@@ -694,6 +721,7 @@ class UVData(UVBase):
                 Default is 'icrs'.
             use_ant_pos: If True, calculate the uvws directly from the
                 antenna positions rather than from the existing uvws.
+            metadata_only: If True, don't error if the data don't exist. Default is False.
         """
         if self.phase_type == 'drift':
             pass
@@ -804,12 +832,19 @@ class UVData(UVBase):
         w_lambda = (self.uvw_array[:, 2].reshape(self.Nblts, 1)
                     / const.c.to('m/s').value * self.freq_array.reshape(1, self.Nfreqs))
         phs = np.exp(-1j * 2 * np.pi * w_lambda[:, None, :, None])
-        self.data_array *= phs
+        if self.data_array is None:
+            if metadata_only is False:
+                raise ValueError('data_array is None, so cannot be phased. '
+                                 'If you wish to operate only on the metadata, '
+                                 'set metadata_only=True')
+        else:
+            self.data_array *= phs
 
         self.phase_center_frame = phase_frame
         self.set_phased()
 
-    def phase_to_time(self, time, phase_frame='icrs', use_ant_pos=False):
+    def phase_to_time(self, time, phase_frame='icrs', use_ant_pos=False,
+                      metadata_only=False):
         """
         Phase a drift scan dataset to the ra/dec of zenith at a particular time.
         See the phasing memo under docs/references for more documentation.
@@ -822,6 +857,7 @@ class UVData(UVBase):
                 Default is 'icrs'.
             use_ant_pos: If True, calculate the uvws directly from the
                 antenna positions rather than from the existing uvws.
+            metadata_only: If True, don't error if the data don't exist. Default is False.
         """
         if self.phase_type == 'drift':
             pass
@@ -851,11 +887,12 @@ class UVData(UVBase):
         zenith_dec = obs_zenith_coord.dec
 
         self.phase(zenith_ra, zenith_dec, epoch='J2000', phase_frame=phase_frame,
-                   use_ant_pos=use_ant_pos)
+                   use_ant_pos=use_ant_pos, metadata_only=metadata_only)
 
     def set_uvws_from_antenna_positions(self, allow_phasing=False,
                                         orig_phase_frame=None,
-                                        output_phase_frame='icrs'):
+                                        output_phase_frame='icrs',
+                                        metadata_only=False):
         """
         Calculate UVWs based on antenna_positions
 
@@ -871,6 +908,7 @@ class UVData(UVBase):
                 allow_phasing=True.
             output_phase_frame: The astropy frame to phase to. Either 'icrs' or
                 'gcrs'. Default is 'icrs'. Applied only if allow_phasing=True.
+            metadata_only: If True, don't error if the data don't exist. Default is False.
         """
         phase_type = self.phase_type
         if phase_type == 'phased':
@@ -887,7 +925,8 @@ class UVData(UVBase):
                 phase_center_ra = self.phase_center_ra
                 phase_center_dec = self.phase_center_dec
                 phase_center_epoch = self.phase_center_epoch
-                self.unphase_to_drift(phase_frame=orig_phase_frame)
+                self.unphase_to_drift(phase_frame=orig_phase_frame,
+                                      metadata_only=metadata_only)
             else:
                 raise ValueError('UVW calculation requires unphased data. '
                                  'Use unphase_to_drift or set '
@@ -908,7 +947,7 @@ class UVData(UVBase):
         self.uvw_array = uvw_array
         if phase_type == 'phased':
             self.phase(phase_center_ra, phase_center_dec, phase_center_epoch,
-                       phase_frame=output_phase_frame)
+                       phase_frame=output_phase_frame, metadata_only=metadata_only)
 
     def __add__(self, other, run_check=True, check_extra=True,
                 run_check_acceptability=True, inplace=False):
