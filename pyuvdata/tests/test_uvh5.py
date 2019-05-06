@@ -14,14 +14,14 @@ import nose.tools as nt
 from astropy.time import Time
 
 from pyuvdata import UVData
-from pyuvdata import uvh5
 import pyuvdata.utils as uvutils
 from pyuvdata.data import DATA_PATH
 import pyuvdata.tests as uvtest
-from pyuvdata.uvh5 import _hera_corr_dtype
 
 try:
     import h5py
+    from pyuvdata import uvh5
+    from pyuvdata.uvh5 import _hera_corr_dtype
 except(ImportError):
     pass
 
@@ -106,7 +106,9 @@ def test_WriteUVH5Errors():
     testfile = os.path.join(DATA_PATH, 'test', 'outtest_uvfits.uvh5')
     with open(testfile, 'a'):
         os.utime(testfile, None)
-    nt.assert_raises(ValueError, uv_in.write_uvh5, testfile)
+
+    # assert IOError if file exists
+    nt.assert_raises(IOError, uv_in.write_uvh5, testfile, clobber=False)
 
     # use clobber=True to write out anyway
     uv_in.write_uvh5(testfile, clobber=True)
@@ -187,6 +189,39 @@ def test_UVH5ReadMultiple_files():
     uv2.write_uvh5(testfile2, clobber=True)
     uvtest.checkWarnings(uv1.read, [[testfile1, testfile2]], nwarnings=2,
                          message='Telescope EVLA is not')
+    # Check history is correct, before replacing and doing a full object check
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific frequencies using pyuvdata. '
+                                            'Combined data along frequency axis using'
+                                            ' pyuvdata.', uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # clean up
+    os.remove(testfile1)
+    os.remove(testfile2)
+
+    return
+
+
+@uvtest.skipIf_no_h5py
+def test_UVH5ReadMultiple_files_axis():
+    """
+    Test reading multiple uvh5 files with setting axis
+    """
+    uv_full = UVData()
+    uvfits_file = os.path.join(DATA_PATH, 'day2_TDEM0003_10s_norx_1src_1spw.uvfits')
+    testfile1 = os.path.join(DATA_PATH, 'test/uv1.uvh5')
+    testfile2 = os.path.join(DATA_PATH, 'test/uv2.uvh5')
+    uvtest.checkWarnings(uv_full.read_uvfits, [uvfits_file], message='Telescope EVLA is not')
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=np.arange(0, 32))
+    uv2.select(freq_chans=np.arange(32, 64))
+    uv1.write_uvh5(testfile1, clobber=True)
+    uv2.write_uvh5(testfile2, clobber=True)
+    uvtest.checkWarnings(uv1.read, [[testfile1, testfile2]], {'axis': 'freq'},
+                         nwarnings=2, message='Telescope EVLA is not')
     # Check history is correct, before replacing and doing a full object check
     nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
                                             'specific frequencies using pyuvdata. '
@@ -319,6 +354,16 @@ def test_UVH5PartialWrite():
     # now read in the full file and make sure that it matches the original
     partial_uvh5.read(partial_testfile)
     nt.assert_equal(full_uvh5, partial_uvh5)
+
+    # test add_to_history
+    key = antpairpols[0]
+    data = full_uvh5.get_data(key, squeeze='none')
+    flags = full_uvh5.get_flags(key, squeeze='none')
+    nsamples = full_uvh5.get_nsamples(key, squeeze='none')
+    partial_uvh5.write_uvh5_part(partial_testfile, data, flags, nsamples,
+                                 bls=key, add_to_history="foo")
+    partial_uvh5.read(partial_testfile, read_data=False)
+    nt.assert_true('foo' in partial_uvh5.history)
 
     # start over, and write frequencies
     partial_uvh5 = copy.deepcopy(full_uvh5)
@@ -860,14 +905,14 @@ def test_UVH5InitializeFile():
     partial_uvh5.read(partial_testfile, read_data=False)
     nt.assert_equal(partial_uvh5, full_uvh5)
 
+    # check that IOError is raised then when clobber == False
+    nt.assert_raises(IOError, partial_uvh5.initialize_uvh5_file, partial_testfile, clobber=False)
+
     # add options for compression
     partial_uvh5.initialize_uvh5_file(partial_testfile, clobber=True, data_compression="lzf",
                                       flags_compression=None, nsample_compression=None)
     partial_uvh5.read(partial_testfile, read_data=False)
     nt.assert_equal(partial_uvh5, full_uvh5)
-
-    # check that an error is raised then file exists and clobber is False
-    nt.assert_raises(ValueError, partial_uvh5.initialize_uvh5_file, partial_testfile, clobber=False)
 
     # clean up
     os.remove(testfile)

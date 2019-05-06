@@ -25,7 +25,8 @@ except(ImportError):
     healpy_installed = False
 
 filenames = ['HERA_NicCST_150MHz.txt', 'HERA_NicCST_123MHz.txt']
-cst_files = [os.path.join(DATA_PATH, f) for f in filenames]
+cst_folder = 'NicCSTbeams'
+cst_files = [os.path.join(DATA_PATH, cst_folder, f) for f in filenames]
 
 
 class TestUVBeamInit(object):
@@ -59,9 +60,10 @@ class TestUVBeamInit(object):
                                  '_extra_keywords', '_Nelements',
                                  '_element_coordinate_system',
                                  '_element_location_array', '_delay_array',
-                                 '_interpolation_function',
+                                 '_x_orientation',
+                                 '_interpolation_function', '_freq_interp_kind',
                                  '_gain_array', '_coupling_matrix',
-                                 '_reference_input_impedance', '_reference_output_impedance',
+                                 '_reference_impedance',
                                  '_receiver_temperature_array',
                                  '_loss_array', '_mismatch_array',
                                  '_s_parameters']
@@ -73,9 +75,10 @@ class TestUVBeamInit(object):
                                  'basis_vector_array', 'extra_keywords', 'Nelements',
                                  'element_coordinate_system',
                                  'element_location_array', 'delay_array',
-                                 'interpolation_function',
+                                 'x_orientation',
+                                 'interpolation_function', 'freq_interp_kind',
                                  'gain_array', 'coupling_matrix',
-                                 'reference_input_impedance', 'reference_output_impedance',
+                                 'reference_impedance',
                                  'receiver_temperature_array',
                                  'loss_array', 'mismatch_array',
                                  's_parameters']
@@ -121,7 +124,7 @@ class TestUVBeamInit(object):
         attributes = [i for i in self.beam_obj.__dict__.keys() if i[0] == '_']
         for a in attributes:
             nt.assert_true(a in expected_parameters,
-                           msg='unexpected parameter ' + a + ' found in UVData')
+                           msg='unexpected parameter ' + a + ' found in UVBeam')
 
     def test_unexpected_attributes(self):
         "Test for extra attributes."
@@ -130,7 +133,7 @@ class TestUVBeamInit(object):
         attributes = [i for i in self.beam_obj.__dict__.keys() if i[0] != '_']
         for a in attributes:
             nt.assert_true(a in expected_attributes,
-                           msg='unexpected attribute ' + a + ' found in UVData')
+                           msg='unexpected attribute ' + a + ' found in UVBeam')
 
     def test_properties(self):
         "Test that properties can be get and set properly."
@@ -365,7 +368,62 @@ def test_efield_to_power():
     nt.assert_raises(ValueError, efield_beam.efield_to_power)
 
 
-def test_interpolation():
+def test_freq_interpolation():
+    power_beam = UVBeam()
+    power_beam.read_cst_beam(cst_files, beam_type='power', frequency=[150e6, 123e6],
+                             telescope_name='TEST', feed_name='bob',
+                             feed_version='0.1', feed_pol=['x'],
+                             model_name='E-field pattern - Rigging height 4.9m',
+                             model_version='1.0')
+
+    # test frequency interpolation returns data arrays for small and large tolerances
+    freq_orig_vals = np.array([123e6, 150e6])
+    interp_data, interp_bandpass = power_beam._interp_freq(freq_orig_vals, tol=0.0, new_object=False)
+    nt.assert_true(isinstance(interp_data, np.ndarray))
+    nt.assert_true(isinstance(interp_bandpass, np.ndarray))
+
+    interp_data, interp_bandpass = power_beam._interp_freq(freq_orig_vals, tol=1.0, new_object=False)
+    nt.assert_true(isinstance(interp_data, np.ndarray))
+    nt.assert_true(isinstance(interp_bandpass, np.ndarray))
+
+    # test frequency interpolation returns new UVBeam for small and large tolerances
+    power_beam.saved_interp_functions = {}
+    interp_data, interp_bandpass = power_beam._interp_freq(freq_orig_vals, tol=0.0, new_object=True)
+    nt.assert_true(isinstance(interp_data, UVBeam))
+    nt.assert_true(interp_bandpass is None)
+    np.testing.assert_array_almost_equal(interp_data.freq_array[0], freq_orig_vals)
+    nt.assert_equal(interp_data.freq_interp_kind, 'linear')
+    nt.assert_false(hasattr(interp_data, 'saved_interp_functions'))  # test that saved functions are erased in new obj
+
+    interp_data, interp_bandpass = power_beam._interp_freq(freq_orig_vals, tol=1.0, new_object=True)
+    nt.assert_true(isinstance(interp_data, UVBeam))
+    nt.assert_true(interp_bandpass is None)
+    np.testing.assert_array_almost_equal(interp_data.freq_array[0], freq_orig_vals)
+    nt.assert_true(interp_data.freq_interp_kind, 'nearest')  # assert interp kind is 'nearest' when within tol
+
+    # using only one freq chan should trigger a ValueError if interp_bool is True
+    # unless requesting the original frequency channel such that interp_bool is False.
+    # Therefore, to test that interp_bool is False returns array slice as desired,
+    # test that ValueError is not raised in this case.
+    # Other ways of testing this (e.g. interp_data_array.flags['OWNDATA']) does not work
+    _pb = power_beam.select(frequencies=power_beam.freq_array[0, :1], inplace=False)
+    try:
+        interp_data_array, interp_bandp = _pb._interp_freq(_pb.freq_array[0], kind='linear')
+    except ValueError:
+        raise AssertionError("UVBeam._interp_freq didn't return an array slice as expected")
+
+    # test errors if one frequency
+    power_beam_singlef = power_beam.select(freq_chans=[0], inplace=False)
+    nt.assert_raises(ValueError, power_beam_singlef._interp_freq, np.array([150e6]))
+
+    # assert freq_interp_kind ValueError
+    power_beam.interpolation_function = 'az_za_simple'
+    power_beam.freq_interp_kind = None
+    nt.assert_raises(ValueError, power_beam.interp, az_array=power_beam.axis1_array, za_array=power_beam.axis2_array,
+                     freq_array=freq_orig_vals, polarizations=['xx'])
+
+
+def test_spatial_interpolation():
     power_beam = UVBeam()
     power_beam.read_cst_beam(cst_files, beam_type='power', frequency=[150e6, 123e6],
                              telescope_name='TEST', feed_name='bob',
@@ -394,6 +452,16 @@ def test_interpolation():
 
     nt.assert_true(np.allclose(data_array_compare, interp_data_array))
 
+    # test only a single polarization
+    interp_data_array, interp_basis_vector = power_beam.interp(az_array=az_orig_vals,
+                                                               za_array=za_orig_vals,
+                                                               freq_array=freq_orig_vals,
+                                                               polarizations=['xx'])
+
+    data_array_compare = power_beam.data_array[:, :, :1]
+    interp_data_array = interp_data_array.reshape(data_array_compare.shape, order='F')
+    nt.assert_true(np.allclose(data_array_compare, interp_data_array))
+
     # test no errors using different points
     az_interp_vals = np.array(np.arange(0, 2 * np.pi, np.pi / 9.0).tolist()
                               + np.arange(0, 2 * np.pi, np.pi / 9.0).tolist())
@@ -419,6 +487,10 @@ def test_interpolation():
 
     # test no errors only frequency interpolation
     interp_data_array, interp_basis_vector = power_beam.interp(freq_array=freq_interp_vals)
+
+    # assert polarization value error
+    nt.assert_raises(ValueError, power_beam.interp, az_array=az_interp_vals, za_array=za_interp_vals,
+                     polarizations=['pI'])
 
     # redo tests using Efield:
     efield_beam = UVBeam()
@@ -475,15 +547,83 @@ def test_interpolation():
     nt.assert_raises(ValueError, power_beam.interp, az_array=az_interp_vals,
                      za_array=za_interp_vals, freq_array=np.array([100]))
 
-    # test errors if one frequency
-    power_beam_singlef = power_beam.select(freq_chans=[0], inplace=False)
-    nt.assert_raises(ValueError, power_beam_singlef.interp, az_array=az_interp_vals,
-                     za_array=za_interp_vals, freq_array=freq_interp_vals)
-
     # test errors if positions outside range
     power_beam.select(axis2_inds=np.where(power_beam.axis2_array <= np.pi / 2.)[0])
     nt.assert_raises(ValueError, power_beam.interp, az_array=az_interp_vals,
                      za_array=za_interp_vals + np.pi / 2)
+
+
+@uvtest.skipIf_no_healpy
+def test_healpix_interpolation():
+    power_beam = UVBeam()
+    power_beam.read_cst_beam(cst_files, beam_type='efield', frequency=[150e6, 123e6],
+                             telescope_name='TEST', feed_name='bob',
+                             feed_version='0.1', feed_pol=['x'],
+                             model_name='E-field pattern - Rigging height 4.9m',
+                             model_version='1.0')
+    power_beam.interpolation_function = 'az_za_simple'
+    power_beam.to_healpix()
+
+    # check that interpolating to existing points gives the same answer
+    power_beam.interpolation_function = 'healpix_simple'
+    za_orig_vals, az_orig_vals = hp.pix2ang(power_beam.nside, np.arange(hp.nside2npix(power_beam.nside)))
+    az_orig_vals = az_orig_vals.ravel(order='C')
+    za_orig_vals = za_orig_vals.ravel(order='C')
+    freq_orig_vals = np.array([123e6, 150e6])
+
+    interp_data_array, interp_basis_vector = power_beam.interp(az_array=az_orig_vals,
+                                                               za_array=za_orig_vals,
+                                                               freq_array=freq_orig_vals)
+    data_array_compare = power_beam.data_array
+    interp_data_array = interp_data_array.reshape(data_array_compare.shape, order='F')
+    nt.assert_true(np.allclose(data_array_compare, interp_data_array))
+
+    # basis_vector exception
+    power_beam.basis_vector_array[0, 1, :] = 10.0
+    nt.assert_raises(NotImplementedError, power_beam.interp, az_array=az_orig_vals, za_array=za_orig_vals)
+
+    # now convert to power beam
+    power_beam.efield_to_power()
+    interp_data_array, interp_basis_vector = power_beam.interp(az_array=az_orig_vals,
+                                                               za_array=za_orig_vals,
+                                                               freq_array=freq_orig_vals)
+    data_array_compare = power_beam.data_array
+    interp_data_array = interp_data_array.reshape(data_array_compare.shape, order='F')
+    nt.assert_true(np.allclose(data_array_compare, interp_data_array))
+
+    # assert not feeding frequencies gives same answer
+    interp_data_array2, interp_basis_vector2 = power_beam.interp(az_array=az_orig_vals, za_array=za_orig_vals)
+    nt.assert_true(np.allclose(interp_data_array, interp_data_array2))
+
+    # assert not feeding az_array gives same answer
+    interp_data_array2, interp_basis_vector2 = power_beam.interp(az_array=az_orig_vals, za_array=za_orig_vals)
+    nt.assert_true(np.allclose(interp_data_array, interp_data_array2))
+
+    # test requesting polarization gives the same answer
+    interp_data_array2, interp_basis_vector2 = power_beam.interp(az_array=az_orig_vals, za_array=za_orig_vals,
+                                                                 polarizations=['yy'])
+    nt.assert_true(np.allclose(interp_data_array[:, :, 1:2], interp_data_array2[:, :, :1]))
+
+    # change complex data_array to real data_array and test again
+    power_beam.data_array = np.abs(power_beam.data_array)
+    interp_data_array, interp_basis_vector = power_beam.interp(az_array=az_orig_vals,
+                                                               za_array=za_orig_vals,
+                                                               freq_array=freq_orig_vals)
+    data_array_compare = power_beam.data_array
+    interp_data_array = interp_data_array.reshape(data_array_compare.shape, order='F')
+    nt.assert_true(np.allclose(data_array_compare, interp_data_array))
+
+    # test no inputs equals same answer
+    interp_data_array2, interp_basis_vector2 = power_beam.interp()
+    nt.assert_true(np.allclose(interp_data_array, interp_data_array2))
+
+    # assert polarization value error
+    nt.assert_raises(ValueError, power_beam.interp, az_array=az_orig_vals, za_array=za_orig_vals,
+                     polarizations=['pI'])
+
+    # healpix coord exception
+    power_beam.pixel_coordinate_system = 'foo'
+    nt.assert_raises(ValueError, power_beam.interp, az_array=az_orig_vals, za_array=za_orig_vals)
 
 
 @uvtest.skipIf_no_healpy
@@ -568,8 +708,7 @@ def test_select_axis():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))
@@ -655,8 +794,7 @@ def test_select_frequencies():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))
@@ -734,8 +872,7 @@ def test_select_feeds():
 
     # add optional parameters for testing purposes
     efield_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    efield_beam.reference_input_impedance = 340.
-    efield_beam.reference_output_impedance = 50.
+    efield_beam.reference_impedance = 340.
     efield_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.loss_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(efield_beam.Nspws, efield_beam.Nfreqs))
@@ -790,8 +927,7 @@ def test_select_polarizations():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))
@@ -841,8 +977,7 @@ def test_select():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))
@@ -906,8 +1041,7 @@ def test_select():
 
     # add optional parameters for testing purposes
     efield_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    efield_beam.reference_input_impedance = 340.
-    efield_beam.reference_output_impedance = 50.
+    efield_beam.reference_impedance = 340.
     efield_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.loss_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(efield_beam.Nspws, efield_beam.Nfreqs))
@@ -967,8 +1101,7 @@ def test_add():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))
@@ -1067,8 +1200,7 @@ def test_add():
 
     # add optional parameters for testing purposes
     efield_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    efield_beam.reference_input_impedance = 340.
-    efield_beam.reference_output_impedance = 50.
+    efield_beam.reference_impedance = 340.
     efield_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.loss_array = np.random.normal(50.0, 5, size=(efield_beam.Nspws, efield_beam.Nfreqs))
     efield_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(efield_beam.Nspws, efield_beam.Nfreqs))
@@ -1239,8 +1371,7 @@ def test_healpix():
 
     # add optional parameters for testing purposes
     power_beam.extra_keywords = {'KEY1': 'test_keyword'}
-    power_beam.reference_input_impedance = 340.
-    power_beam.reference_output_impedance = 50.
+    power_beam.reference_impedance = 340.
     power_beam.receiver_temperature_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.loss_array = np.random.normal(50.0, 5, size=(power_beam.Nspws, power_beam.Nfreqs))
     power_beam.mismatch_array = np.random.normal(0.0, 1.0, size=(power_beam.Nspws, power_beam.Nfreqs))

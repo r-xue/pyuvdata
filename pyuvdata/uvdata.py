@@ -145,7 +145,7 @@ class UVData(UVBase):
 
         # this dimensionality of freq_array does not allow for different spws
         # to have different dimensions
-        desc = 'Array of frequencies, shape (Nspws, Nfreqs), units Hz'
+        desc = 'Array of frequencies, center of the channel, shape (Nspws, Nfreqs), units Hz'
         self._freq_array = uvp.UVParameter('freq_array', description=desc,
                                            form=('Nspws', 'Nfreqs'),
                                            expected_type=np.float,
@@ -166,7 +166,7 @@ class UVData(UVBase):
                                                        np.arange(-8, 0)) + list(np.arange(1, 5)),
                                                    form=('Npols',))
 
-        desc = ('Length of the integration in seconds, shape (NBlts). '
+        desc = ('Length of the integration in seconds, shape (Nblts). '
                 'The product of the integration_time and the nsample_array '
                 'value for a visibility reflects the total amount of time '
                 'that went into the visibility. Best practice is for the '
@@ -281,11 +281,12 @@ class UVData(UVBase):
 
         # -------- extra, non-required parameters ----------
         desc = ('Orientation of the physical dipole corresponding to what is '
-                'labelled as the x polarization. Examples include "east" '
+                'labelled as the x polarization. Options are "east" '
                 '(indicating east/west orientation) and "north" (indicating '
                 'north/south orientation)')
         self._x_orientation = uvp.UVParameter('x_orientation', description=desc,
-                                              required=False, expected_type=str)
+                                              required=False, expected_type=str,
+                                              acceptable_vals=['east', 'north'])
 
         desc = ('Any user supplied extra keywords, type=dict. Keys should be '
                 '8 character or less strings if writing to uvfits or miriad files. '
@@ -370,6 +371,23 @@ class UVData(UVBase):
             self.set_drift()
         else:
             self.set_unknown_phase_type()
+
+        # check for deprecated x_orientation strings and convert to new values (if possible)
+        if self.x_orientation is not None:
+            if self.x_orientation not in self._x_orientation.acceptable_vals:
+                warn_string = ('x_orientation {xval} is not one of [{vals}], '
+                               .format(xval=self.x_orientation,
+                                       vals=(', ').join(self._x_orientation.acceptable_vals)))
+                if self.x_orientation.lower() == 'e':
+                    self.x_orientation = 'east'
+                    warn_string += 'converting to "east".'
+                elif self.x_orientation.lower() == 'n':
+                    self.x_orientation = 'north'
+                    warn_string += 'converting to "north".'
+                else:
+                    warn_string += 'cannot be converted.'
+
+                warnings.warn(warn_string, PendingDeprecationWarning)
 
         super(UVData, self).check(check_extra=check_extra,
                                   run_check_acceptability=run_check_acceptability)
@@ -533,30 +551,6 @@ class UVData(UVBase):
             integer baseline number corresponding to the two antenna numbers.
         """
         return uvutils.antnums_to_baseline(ant1, ant2, self.Nants_telescope, attempt256=attempt256)
-
-    def order_pols(self, order='AIPS'):
-        '''
-        Arranges polarizations in orders corresponding to either AIPS or CASA convention.
-        CASA stokes types are ordered with cross-pols in between (e.g. XX,XY,YX,YY) while
-        AIPS orders pols with auto-pols followed by cross-pols (e.g. XX,YY,XY,YX)
-        Args:
-        order: string, either 'CASA' or 'AIPS'. Default='AIPS'
-        '''
-        if(order == 'AIPS'):
-            pol_inds = np.argsort(self.polarization_array)
-            pol_inds = pol_inds[::-1]
-        elif(order == 'CASA'):  # sandwich
-            casa_order = np.array([1, 2, 3, 4, -1, -3, -4, -2, -5, -7, -8, -6])
-            pol_inds = []
-            for pol in self.polarization_array:
-                pol_inds.append(np.where(casa_order == pol)[0][0])
-            pol_inds = np.argsort(pol_inds)
-        else:
-            warnings.warn('Invalid order supplied. No sorting performed.')
-            pol_inds = list(range(self.Npols))
-        # Generate a map from original indices to new indices
-        if not np.array_equal(pol_inds, self.Npols):
-            self.reorder_pols(order=pol_inds)
 
     def set_lsts_from_time_array(self):
         """Set the lst_array based from the time_array."""
@@ -910,6 +904,67 @@ class UVData(UVBase):
             self.phase(phase_center_ra, phase_center_dec, phase_center_epoch,
                        phase_frame=output_phase_frame)
 
+    def reorder_pols(self, order='AIPS', run_check=True, check_extra=True,
+                     run_check_acceptability=True):
+        """
+        Rearrange polarizations in the event they are not uvfits compatible.
+
+        Args:
+            order: either a string specifying a cannonical ordering
+                ('AIPS' or 'CASA') or an index array of length Npols that
+                specifies how to shuffle the data (this is not the desired
+                final pol order).
+                CASA ordering has cross-pols in between (e.g. XX,XY,YX,YY)
+                AIPS ordering has auto-pols followed by cross-pols (e.g. XX,YY,XY,YX)
+                Default ('AIPS') will sort by absolute value of pol values.
+            run_check: Option to check for the existence and proper shapes of
+                parameters after reordering. Default is True.
+            check_extra: Option to check optional parameters as well as required
+                ones. Default is True.
+            run_check_acceptability: Option to check acceptable range of the values of
+                parameters after reordering. Default is True.
+        """
+        if isinstance(order, (np.ndarray, list, tuple)):
+            order = np.array(order)
+            if (order.size != self.Npols
+                    or order.dtype not in [int, np.int, np.int32, np.int64]
+                    or np.min(order) < 0 or np.max(order) >= self.Npols):
+                raise ValueError('If order is an index array, it must '
+                                 'contain integers and be length Npols.')
+            index_array = order
+        elif order == 'AIPS':
+            index_array = np.argsort(np.abs(self.polarization_array))
+        elif order == 'CASA':
+            casa_order = np.array([1, 2, 3, 4, -1, -3, -4, -2, -5, -7, -8, -6])
+            pol_inds = []
+            for pol in self.polarization_array:
+                pol_inds.append(np.where(casa_order == pol)[0][0])
+            index_array = np.argsort(pol_inds)
+        else:
+            raise ValueError("order must be one of: 'AIPS', 'CASA', or an "
+                             "index array of length Npols")
+
+        self.polarization_array = self.polarization_array[index_array]
+        self.data_array = self.data_array[:, :, :, index_array]
+        self.nsample_array = self.nsample_array[:, :, :, index_array]
+        self.flag_array = self.flag_array[:, :, :, index_array]
+
+        # check if object is self-consistent
+        if run_check:
+            self.check(check_extra=check_extra,
+                       run_check_acceptability=run_check_acceptability)
+
+    def order_pols(self, order='AIPS'):
+        """
+        Soon to be deprecated method, now just calls reorder_pols.
+
+        Args:
+            order: string, either 'CASA' or 'AIPS'. Default='AIPS'
+        """
+        warnings.warn('order_pols method will soon be deprecated in favor of '
+                      'reorder_pols', PendingDeprecationWarning)
+        self.reorder_pols(order=order)
+
     def __add__(self, other, run_check=True, check_extra=True,
                 run_check_acceptability=True, inplace=False):
         """
@@ -964,17 +1019,37 @@ class UVData(UVBase):
                                          str(blt[1]).zfill(prec_b)]) for blt in
                                zip(other.time_array, other.baseline_array)])
         # Check we don't have overlapping data
-        both_pol = np.intersect1d(
-            this.polarization_array, other.polarization_array)
-        both_freq = np.intersect1d(
-            this.freq_array[0, :], other.freq_array[0, :])
-        both_blts = np.intersect1d(this_blts, other_blts)
+        both_pol, this_pol_ind, other_pol_ind = np.intersect1d(
+            this.polarization_array, other.polarization_array, return_indices=True)
+        both_freq, this_freq_ind, other_freq_ind = np.intersect1d(
+            this.freq_array[0, :], other.freq_array[0, :], return_indices=True)
+        both_blts, this_blts_ind, other_blts_ind = np.intersect1d(
+            this_blts, other_blts, return_indices=True)
         if len(both_pol) > 0:
             if len(both_freq) > 0:
                 if len(both_blts) > 0:
-                    raise ValueError('These objects have overlapping data and'
-                                     ' cannot be combined.')
+                    # check that overlapping data is not valid
+                    this_all_zero = np.all(this.data_array[this_blts_ind][
+                        :, :, this_freq_ind][:, :, :, this_pol_ind] == 0)
+                    this_all_flag = np.all(this.flag_array[this_blts_ind][
+                        :, :, this_freq_ind][:, :, :, this_pol_ind])
+                    other_all_zero = np.all(other.data_array[other_blts_ind][
+                        :, :, other_freq_ind][:, :, :, other_pol_ind] == 0)
+                    other_all_flag = np.all(other.flag_array[other_blts_ind][
+                        :, :, other_freq_ind][:, :, :, other_pol_ind])
+                    if (this_all_zero and this_all_flag):
+                        # we're fine to overwrite; update history accordingly
+                        history_update_string = ' Overwrote invalid data using pyuvdata.'
+                        this.history += history_update_string
+                    elif (other_all_zero and other_all_flag):
+                        raise ValueError('To combine these data, please run the add operation again, '
+                                         'but with the object whose data is to be overwritten as the '
+                                         'first object in the add operation.')
+                    else:
+                        raise ValueError('These objects have overlapping data and'
+                                         ' cannot be combined.')
 
+        # find the blt indices in "other" but not in "this"
         temp = np.nonzero(~np.in1d(other_blts, this_blts))[0]
         if len(temp) > 0:
             bnew_inds = temp
@@ -987,6 +1062,7 @@ class UVData(UVBase):
             extra_params = ['_integration_time', '_uvw_array', '_lst_array']
             compatibility_params.extend(extra_params)
 
+        # find the freq indices in "other" but not in "this"
         temp = np.nonzero(
             ~np.in1d(other.freq_array[0, :], this.freq_array[0, :]))[0]
         if len(temp) > 0:
@@ -1000,6 +1076,7 @@ class UVData(UVBase):
         else:
             fnew_inds, new_freqs = ([], [])
 
+        # find the pol indices in "other" but not in "this"
         temp = np.nonzero(~np.in1d(other.polarization_array,
                                    this.polarization_array))[0]
         if len(temp) > 0:
@@ -1015,7 +1092,27 @@ class UVData(UVBase):
 
         # Actually check compatibility parameters
         for a in compatibility_params:
-            if getattr(this, a) != getattr(other, a):
+            if a == "_integration_time":
+                # only check that overlapping blt indices match
+                params_match = np.allclose(this.integration_time[this_blts_ind],
+                                           other.integration_time[other_blts_ind],
+                                           rtol=this._integration_time.tols[0],
+                                           atol=this._integration_time.tols[1])
+            elif a == "_uvw_array":
+                # only check that overlapping blt indices match
+                params_match = np.allclose(this.uvw_array[this_blts_ind, :],
+                                           other.uvw_array[other_blts_ind, :],
+                                           rtol=this._uvw_array.tols[0],
+                                           atol=this._uvw_array.tols[1])
+            elif a == "_lst_array":
+                # only check that overlapping blt indices match
+                params_match = np.allclose(this.lst_array[this_blts_ind],
+                                           other.lst_array[other_blts_ind],
+                                           rtol=this._lst_array.tols[0],
+                                           atol=this._lst_array.tols[1])
+            else:
+                params_match = (getattr(this, a) == getattr(other, a))
+            if not params_match:
                 msg = 'UVParameter ' + \
                     a[1:] + ' does not match. Cannot combine objects.'
                 raise ValueError(msg)
@@ -1142,6 +1239,145 @@ class UVData(UVBase):
         """
         self.__add__(other, inplace=True)
         return self
+
+    def fast_concat(self, other, axis, run_check=True, check_extra=True,
+                    run_check_acceptability=True, inplace=False):
+        """
+        Concatenate two UVData objects along specified axis with almost no checking of metadata.
+
+        Warning! This method assumes all the metadata along other axes is sorted
+        the same way. The __add__ method is much safer, it checks all the metadata,
+        but it is slower. Some quick checks are run, but this method doesn't
+        make any guarantees that the resulting object is correct.
+
+        Args:
+            other: Another UVData object which will be added to self.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. Allowed values are: 'blt', 'freq', 'polarization'.
+            run_check: Option to check for the existence and proper shapes of
+                parameters after combining objects. Default is True.
+            check_extra: Option to check optional parameters as well as
+                required ones. Default is True.
+            run_check_acceptability: Option to check acceptable range of the values of
+                parameters after combining objects. Default is True.
+            inplace: Overwrite self as we go, otherwise create a third object
+                as the sum of the two (default).
+        """
+        if inplace:
+            this = self
+        else:
+            this = copy.deepcopy(self)
+        # Check that both objects are UVData and valid
+        this.check(check_extra=check_extra, run_check_acceptability=run_check_acceptability)
+        if not issubclass(other.__class__, this.__class__):
+            if not issubclass(this.__class__, other.__class__):
+                raise ValueError('Only UVData (or subclass) objects can be '
+                                 'added to a UVData (or subclass) object')
+        other.check(check_extra=check_extra, run_check_acceptability=run_check_acceptability)
+
+        allowed_axes = ['blt', 'freq', 'polarization']
+        if axis not in allowed_axes:
+            raise ValueError('If axis is specifed it must be one of: '
+                             + ', '.join(allowed_axes))
+
+        compatibility_params = ['_vis_units', '_channel_width', '_object_name',
+                                '_telescope_name', '_instrument',
+                                '_telescope_location', '_phase_type',
+                                '_Nants_telescope', '_antenna_names',
+                                '_antenna_numbers', '_antenna_positions',
+                                '_phase_center_ra', '_phase_center_dec',
+                                '_phase_center_epoch']
+
+        history_update_string = ' Combined data along '
+
+        if axis == 'freq':
+            history_update_string += 'frequency'
+            compatibility_params += ['_polarization_array', '_ant_1_array',
+                                     '_ant_2_array', '_integration_time',
+                                     '_uvw_array', '_lst_array']
+        elif axis == 'polarization':
+            history_update_string += 'polarization'
+            compatibility_params += ['_freq_array', '_ant_1_array',
+                                     '_ant_2_array', '_integration_time',
+                                     '_uvw_array', '_lst_array']
+        elif axis == 'blt':
+            history_update_string += 'baseline-time'
+            compatibility_params += ['_freq_array', '_polarization_array']
+
+        history_update_string += ' axis using pyuvdata.'
+        this.history += history_update_string
+
+        this.history = uvutils._combine_histories(this.history, other.history)
+
+        # Actually check compatibility parameters
+        for a in compatibility_params:
+            params_match = (getattr(this, a) == getattr(other, a))
+            if not params_match:
+                msg = 'UVParameter ' + \
+                    a[1:] + ' does not match. Cannot combine objects.'
+                raise ValueError(msg)
+
+        if axis == 'freq':
+            this.freq_array = np.concatenate([this.freq_array, other.freq_array], axis=1)
+            this.Nfreqs = this.Nfreqs + other.Nfreqs
+
+            freq_separation = np.diff(this.freq_array[0, :])
+            if not np.isclose(np.min(freq_separation), np.max(freq_separation),
+                              rtol=this._freq_array.tols[0], atol=this._freq_array.tols[1]):
+                warnings.warn('Combined frequencies are not evenly spaced. This will '
+                              'make it impossible to write this data out to some file types.')
+            elif np.max(freq_separation) > this.channel_width:
+                warnings.warn('Combined frequencies are not contiguous. This will make '
+                              'it impossible to write this data out to some file types.')
+
+            this.data_array = np.concatenate([this.data_array, other.data_array], axis=2)
+            this.nsample_array = np.concatenate([this.nsample_array, other.nsample_array], axis=2)
+            this.flag_array = np.concatenate([this.flag_array, other.flag_array], axis=2)
+        elif axis == 'polarization':
+            this.polarization_array = np.concatenate([this.polarization_array,
+                                                     other.polarization_array])
+            this.Npols = this.Npols + other.Npols
+
+            pol_separation = np.diff(this.polarization_array)
+            if np.min(pol_separation) < np.max(pol_separation):
+                warnings.warn('Combined polarizations are not evenly spaced. This will '
+                              'make it impossible to write this data out to some file types.')
+
+            this.data_array = np.concatenate([this.data_array, other.data_array], axis=3)
+            this.nsample_array = np.concatenate([this.nsample_array, other.nsample_array], axis=3)
+            this.flag_array = np.concatenate([this.flag_array, other.flag_array], axis=3)
+        elif axis == 'blt':
+            this.Nblts = this.Nblts + other.Nblts
+            this.ant_1_array = np.concatenate([this.ant_1_array,
+                                              other.ant_1_array])
+            this.ant_2_array = np.concatenate([this.ant_2_array,
+                                              other.ant_2_array])
+            this.Nants_data = int(len(np.unique(self.ant_1_array.tolist()
+                                                + self.ant_2_array.tolist())))
+            this.uvw_array = np.concatenate([this.uvw_array,
+                                            other.uvw_array], axis=0)
+            this.time_array = np.concatenate([this.time_array,
+                                             other.time_array])
+            this.Ntimes = len(np.unique(this.time_array))
+            this.lst_array = np.concatenate([this.lst_array,
+                                            other.lst_array])
+            this.baseline_array = np.concatenate([this.baseline_array,
+                                                 other.baseline_array])
+            this.Nbls = len(np.unique(this.baseline_array))
+            this.integration_time = np.concatenate([this.integration_time,
+                                                   other.integration_time])
+            this.data_array = np.concatenate([this.data_array, other.data_array], axis=0)
+            this.nsample_array = np.concatenate([this.nsample_array, other.nsample_array], axis=0)
+            this.flag_array = np.concatenate([this.flag_array, other.flag_array], axis=0)
+
+        # Check final object is self-consistent
+        if run_check:
+            this.check(check_extra=check_extra,
+                       run_check_acceptability=run_check_acceptability)
+
+        if not inplace:
+            return this
 
     def _select_preprocess(self, antenna_nums, antenna_names, ant_str, bls,
                            frequencies, freq_chans, times, polarizations, blt_inds):
@@ -1382,7 +1618,7 @@ class UVData(UVBase):
             pol_inds = np.zeros(0, dtype=np.int)
             for p in polarizations:
                 if isinstance(p, str):
-                    p_num = uvutils.polstr2num(p)
+                    p_num = uvutils.polstr2num(p, x_orientation=self.x_orientation)
                 else:
                     p_num = p
                 if p_num in self.polarization_array:
@@ -1583,17 +1819,22 @@ class UVData(UVBase):
             setattr(other_obj, p, param)
         return other_obj
 
-    def read_uvfits(self, filename, antenna_nums=None, antenna_names=None,
+    def read_uvfits(self, filename, axis=None, antenna_nums=None, antenna_names=None,
                     ant_str=None, bls=None, frequencies=None,
                     freq_chans=None, times=None, polarizations=None, blt_inds=None,
-                    read_data=True, read_metadata=True, run_check=True,
-                    check_extra=True, run_check_acceptability=True,
-                    keep_all_metadata=True):
+                    keep_all_metadata=True, read_data=True, read_metadata=True,
+                    run_check=True, check_extra=True, run_check_acceptability=True):
         """
         Read in header, metadata and data from uvfits file(s).
 
         Args:
             filename: The uvfits file or list of files to read from.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             antenna_nums: The antennas numbers to include when reading data into
                 the object (antenna positions and names for the excluded antennas
                 will be retained). This cannot be provided if antenna_names is
@@ -1630,6 +1871,8 @@ class UVData(UVBase):
                 the object.  Ignored if read_data is False.
             blt_inds: The baseline-time indices to include when reading data into
                 the object. This is not commonly used. Ignored if read_data is False.
+            keep_all_metadata: Option to keep all the metadata associated with antennas,
+                even those that do not remain after the select option. Default is True.
             read_data: Read in the visibility and flag data. If set to false,
                 only the basic header info and metadata (if read_metadata is True)
                 will be read in. Setting read_data to False results in an
@@ -1646,8 +1889,6 @@ class UVData(UVBase):
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters after reading in the file. Default is True.
                 Ignored if read_data is False.
-            keep_all_metadata: Option to keep all the metadata associated with antennas,
-                even those that do not remain after the select option. Default is True.
         """
         from . import uvfits
         # work out what function should be called depending on what's
@@ -1709,7 +1950,13 @@ class UVData(UVBase):
                                     run_check=run_check, check_extra=check_extra,
                                     run_check_acceptability=run_check_acceptability,
                                     keep_all_metadata=keep_all_metadata)
-                    self += uv2
+                    if axis is not None:
+                        self.fast_concat(uv2, axis, run_check=run_check,
+                                         check_extra=check_extra,
+                                         run_check_acceptability=run_check_acceptability,
+                                         inplace=True)
+                    else:
+                        self += uv2
                 del(uv2)
         else:
             if func == 'read_uvfits':
@@ -1771,13 +2018,19 @@ class UVData(UVBase):
                                 run_check_acceptability=run_check_acceptability)
         del(uvfits_obj)
 
-    def read_ms(self, filepath, run_check=True, check_extra=True,
+    def read_ms(self, filepath, axis=None, run_check=True, check_extra=True,
                 run_check_acceptability=True, data_column='DATA', pol_order='AIPS'):
         """
         Read in data from a measurement set
 
         Args:
             filepath: The measurement set file directory or list of directories to read from.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             run_check: Option to check for the existence and proper shapes of
                 parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as required
@@ -1801,7 +2054,13 @@ class UVData(UVBase):
                     uv2.read_ms(f, run_check=run_check, check_extra=check_extra,
                                 run_check_acceptability=run_check_acceptability,
                                 data_column=data_column, pol_order=pol_order)
-                    self += uv2
+                    if axis is not None:
+                        self.fast_concat(uv2, axis, run_check=run_check,
+                                         check_extra=check_extra,
+                                         run_check_acceptability=run_check_acceptability,
+                                         inplace=True)
+                    else:
+                        self += uv2
                 del(uv2)
         else:
             ms_obj = ms.MS()
@@ -1811,8 +2070,8 @@ class UVData(UVBase):
             self._convert_from_filetype(ms_obj)
             del(ms_obj)
 
-    def read_fhd(self, filelist, use_model=False, run_check=True, check_extra=True,
-                 run_check_acceptability=True):
+    def read_fhd(self, filelist, use_model=False, axis=None,
+                 run_check=True, check_extra=True, run_check_acceptability=True):
         """
         Read in data from a list of FHD files.
 
@@ -1822,6 +2081,12 @@ class UVData(UVBase):
                 Can also be a list of lists to read multiple data sets.
             use_model: Option to read in the model visibilities rather than the
                 dirty visibilities. Default is False.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             run_check: Option to check for the existence and proper shapes of
                 parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as required
@@ -1840,7 +2105,13 @@ class UVData(UVBase):
                     uv2.read_fhd(f, use_model=use_model, run_check=run_check,
                                  check_extra=check_extra,
                                  run_check_acceptability=run_check_acceptability)
-                    self += uv2
+                    if axis is not None:
+                        self.fast_concat(uv2, axis, run_check=run_check,
+                                         check_extra=check_extra,
+                                         run_check_acceptability=run_check_acceptability,
+                                         inplace=True)
+                    else:
+                        self += uv2
                 del(uv2)
         else:
             fhd_obj = fhd.FHD()
@@ -1850,8 +2121,8 @@ class UVData(UVBase):
             self._convert_from_filetype(fhd_obj)
             del(fhd_obj)
 
-    def read_miriad(self, filepath, antenna_nums=None, ant_str=None, bls=None,
-                    polarizations=None, time_range=None, read_data=True,
+    def read_miriad(self, filepath, axis=None, antenna_nums=None, ant_str=None,
+                    bls=None, polarizations=None, time_range=None, read_data=True,
                     phase_type=None, correct_lat_lon=True, run_check=True,
                     check_extra=True, run_check_acceptability=True):
         """
@@ -1859,6 +2130,12 @@ class UVData(UVBase):
 
         Args:
             filepath: The miriad file directory or list of directories to read from.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             antenna_nums: The antennas numbers to read into the object.
             bls: A list of antenna number tuples (e.g. [(0,1), (3,2)]) or a list of
                 baseline 3-tuples (e.g. [(0,1,'xx'), (2,3,'yy')]) specifying baselines
@@ -1893,7 +2170,7 @@ class UVData(UVBase):
         from . import miriad
         if isinstance(filepath, (list, tuple)):
             if not read_data:
-                raise ValueError('read_data cannot be False for a list of uvfits files')
+                raise ValueError('read_data cannot be False for a list of miriad files')
 
             self.read_miriad(filepath[0], correct_lat_lon=correct_lat_lon,
                              run_check=run_check, check_extra=check_extra,
@@ -1910,7 +2187,13 @@ class UVData(UVBase):
                                     phase_type=phase_type, antenna_nums=antenna_nums,
                                     ant_str=ant_str, bls=bls,
                                     polarizations=polarizations, time_range=time_range)
-                    self += uv2
+                    if axis is not None:
+                        self.fast_concat(uv2, axis, run_check=run_check,
+                                         check_extra=check_extra,
+                                         run_check_acceptability=run_check_acceptability,
+                                         inplace=True)
+                    else:
+                        self += uv2
                 del(uv2)
         else:
             # work out what function should be called
@@ -1956,16 +2239,22 @@ class UVData(UVBase):
                                 clobber=clobber, no_antnums=no_antnums)
         del(miriad_obj)
 
-    def read_uvh5(self, filename, antenna_nums=None, antenna_names=None,
+    def read_uvh5(self, filename, axis=None, antenna_nums=None, antenna_names=None,
                   ant_str=None, bls=None, frequencies=None, freq_chans=None,
-                  times=None, polarizations=None, blt_inds=None, read_data=True,
-                  run_check=True, check_extra=True, run_check_acceptability=True,
-                  data_array_dtype=np.complex128, keep_all_metadata=True):
+                  times=None, polarizations=None, blt_inds=None,
+                  keep_all_metadata=True, read_data=True, data_array_dtype=np.complex128,
+                  run_check=True, check_extra=True, run_check_acceptability=True):
         """
         Read a UVH5 file.
 
         Args:
             filename: The UVH5 file or list of files to read from.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             antenna_nums: The antennas numbers to include when reading data into
                 the object (antenna positions and names for the excluded antennas
                 will be retained). This cannot be provided if antenna_names is
@@ -2002,22 +2291,22 @@ class UVData(UVBase):
                 the object.  Ignored if read_data is False.
             blt_inds: The baseline-time indices to include when reading data into
                 the object. This is not commonly used. Ignored if read_data is False.
+            keep_all_metadata: Option to keep all the metadata associated with antennas,
+                even those that do not remain after the select option. Default is True.
             read_data: Read in the visibility and flag data. If set to false,
                 only the basic metadata will be read in. Setting read_data to
                 False results in an incompletely defined object (check will not
                 pass). Default True.
+            data_array_dtype: Datatype to store the output data_array as. Must be either
+                np.complex64 (single-precision real and imaginary) or np.complex128 (double-
+                precision real and imaginary). Only used if the datatype of the visibility
+                data on-disk is not 'c8' or 'c16'. Default is np.complex128.
             run_check: Option to check for the existence and proper shapes of
                 parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as required
                 ones. Default is True.
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters after reading in the file. Default is True.
-            data_array_dtype: Datatype to store the output data_array as. Must be either
-                np.complex64 (single-precision real and imaginary) or np.complex128 (double-
-                precision real and imaginary). Only used if the datatype of the visibility
-                data on-disk is not 'c8' or 'c16'. Default is np.complex128.
-            keep_all_metadata: Option to keep all the metadata associated with antennas,
-                even those that do not remain after the select option. Default is True.
 
         Returns:
             None
@@ -2039,7 +2328,7 @@ class UVData(UVBase):
             if len(filename) > 1:
                 for f in filename[1:]:
                     uv2 = UVData()
-                    uv2.read_uvh5(f, antenna_nums=antenna_nums,
+                    uv2.read_uvh5(f, axis=axis, antenna_nums=antenna_nums,
                                   antenna_names=antenna_names, ant_str=ant_str, bls=bls,
                                   frequencies=frequencies, freq_chans=freq_chans,
                                   times=times, polarizations=polarizations,
@@ -2048,7 +2337,13 @@ class UVData(UVBase):
                                   run_check_acceptability=run_check_acceptability,
                                   data_array_dtype=data_array_dtype,
                                   keep_all_metadata=keep_all_metadata)
-                    self += uv2
+                    if axis is not None:
+                        self.fast_concat(uv2, axis, run_check=run_check,
+                                         check_extra=check_extra,
+                                         run_check_acceptability=run_check_acceptability,
+                                         inplace=True)
+                    else:
+                        self += uv2
                 del(uv2)
         else:
             uvh5_obj = uvh5.UVH5()
@@ -2144,7 +2439,7 @@ class UVData(UVBase):
     def write_uvh5_part(self, filename, data_array, flags_array, nsample_array, check_header=True,
                         antenna_nums=None, antenna_names=None, ant_str=None, bls=None,
                         frequencies=None, freq_chans=None, times=None, polarizations=None,
-                        blt_inds=None, run_check_acceptability=True):
+                        blt_inds=None, run_check_acceptability=True, add_to_history=None):
         """
         Write data to a UVH5 file that has already been initialized.
 
@@ -2195,6 +2490,7 @@ class UVData(UVBase):
                 This is not commonly used.
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters before writing the file. Default is True.
+            add_to_history: String to append to history before write out. Default is no appending.
 
         Returns:
             None
@@ -2206,17 +2502,18 @@ class UVData(UVBase):
                                  frequencies=frequencies, freq_chans=freq_chans,
                                  times=times, polarizations=polarizations,
                                  blt_inds=blt_inds,
-                                 run_check_acceptability=run_check_acceptability)
+                                 run_check_acceptability=run_check_acceptability,
+                                 add_to_history=add_to_history)
         del(uvh5_obj)
 
-    def read(self, filename, file_type=None, antenna_nums=None, antenna_names=None,
-             ant_str=None, bls=None, frequencies=None, freq_chans=None,
-             times=None, polarizations=None, blt_inds=None, time_range=None,
-             read_metadata=True, read_data=True, phase_type=None,
-             correct_lat_lon=True, use_model=False, data_column='DATA',
-             pol_order='AIPS', run_check=True, check_extra=True,
-             run_check_acceptability=True, data_array_dtype=np.complex128,
-             keep_all_metadata=True):
+    def read(self, filename, axis=None, file_type=None,
+             antenna_nums=None, antenna_names=None, ant_str=None, bls=None,
+             frequencies=None, freq_chans=None, times=None, polarizations=None,
+             blt_inds=None, time_range=None, keep_all_metadata=True,
+             read_metadata=True, read_data=True,
+             phase_type=None, correct_lat_lon=True, use_model=False,
+             data_column='DATA', pol_order='AIPS', data_array_dtype=np.complex128,
+             run_check=True, check_extra=True, run_check_acceptability=True):
         """
         Read a generic file into a UVData object.
 
@@ -2229,6 +2526,12 @@ class UVData(UVBase):
                 extensions (FHD: .sav, .txt; uvfits: .uvfits; uvh5: .uvh5).
                 Note that if a list of datasets is passed, the file type is
                 determined from the first dataset.
+            axis: Axis to concatenate files along. This enables fast concatenation
+                along the specified axis without the normal checking that all other
+                metadata agrees. This method does not guarantee correct resulting
+                objects. Please see the docstring for fast_concat for details.
+                Allowed values are: 'blt', 'freq', 'polarization'. Only used if
+                multiple files are passed.
             antenna_nums: The antennas numbers to include when reading data into
                 the object (antenna positions and names for the excluded antennas
                 will be retained). This cannot be provided if antenna_names is
@@ -2266,6 +2569,8 @@ class UVData(UVBase):
                 Ex: [2458115.20, 2458115.40]. Cannot be set with times.
             blt_inds: The baseline-time indices to include when reading data into
                 the object. This is not commonly used. Ignored if read_data is False.
+            keep_all_metadata: Option to keep all the metadata associated with antennas,
+                even those that do not remain after the select option. Default is True.
             read_metadata: Read in metadata (times, baselines, uvws) as well as
                 basic header info. Only used if file_type is 'uvfits' and read_data is False
                 (metadata will be read if data is read). If file_type is 'uvfits'
@@ -2290,18 +2595,16 @@ class UVData(UVBase):
                 'DATA', 'MODEL', or 'CORRECTED_DATA'. Only used if file_type is 'ms'.
             pol_order: specify whether you want polarizations ordered by
                 'CASA' or 'AIPS' conventions. Only used if file_type is 'ms'.
+            data_array_dtype: Datatype to store the output data_array as when reading uvh5
+                files. Must be either np.complex64 (single-precision real and imaginary) or
+                np.complex128 (double-precision real and imaginary). Only used if the datatype
+                of the visibility data on-disk is not 'c8' or 'c16'. Default is np.complex128.
             run_check: Option to check for the existence and proper shapes of
                 parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as required
                 ones. Default is True.
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters after reading in the file. Default is True.
-            data_array_dtype: Datatype to store the output data_array as when reading uvh5
-                files. Must be either np.complex64 (single-precision real and imaginary) or
-                np.complex128 (double-precision real and imaginary). Only used if the datatype
-                of the visibility data on-disk is not 'c8' or 'c16'. Default is np.complex128.
-            keep_all_metadata: Option to keep all the metadata associated with antennas,
-                even those that do not remain after the select option. Default is True.
 
         Returns:
             None
@@ -2371,7 +2674,7 @@ class UVData(UVBase):
                              read_data=read_data, read_metadata=read_metadata,
                              run_check=run_check, check_extra=check_extra,
                              run_check_acceptability=run_check_acceptability,
-                             keep_all_metadata=keep_all_metadata)
+                             keep_all_metadata=keep_all_metadata, axis=axis)
 
             if select:
                 unique_times = np.unique(self.time_array)
@@ -2408,7 +2711,8 @@ class UVData(UVBase):
                              time_range=time_range, read_data=read_data,
                              phase_type=phase_type, correct_lat_lon=correct_lat_lon,
                              run_check=run_check, check_extra=check_extra,
-                             run_check_acceptability=run_check_acceptability)
+                             run_check_acceptability=run_check_acceptability,
+                             axis=axis)
 
             if select:
                 self.select(antenna_names=antenna_names, frequencies=frequencies,
@@ -2433,7 +2737,8 @@ class UVData(UVBase):
 
             self.read_fhd(filename, use_model=use_model, run_check=run_check,
                           check_extra=check_extra,
-                          run_check_acceptability=run_check_acceptability)
+                          run_check_acceptability=run_check_acceptability,
+                          axis=axis)
 
             if select:
                 self.select(antenna_nums=antenna_nums, antenna_names=antenna_names,
@@ -2459,7 +2764,7 @@ class UVData(UVBase):
 
             self.read_ms(filename, run_check=run_check, check_extra=check_extra,
                          run_check_acceptability=run_check_acceptability,
-                         data_column=data_column, pol_order=pol_order)
+                         data_column=data_column, pol_order=pol_order, axis=axis)
 
             if select:
                 self.select(antenna_nums=antenna_nums, antenna_names=antenna_names,
@@ -2485,7 +2790,7 @@ class UVData(UVBase):
                            read_data=read_data, run_check=run_check, check_extra=check_extra,
                            run_check_acceptability=run_check_acceptability,
                            data_array_dtype=data_array_dtype,
-                           keep_all_metadata=keep_all_metadata)
+                           keep_all_metadata=keep_all_metadata, axis=axis)
 
             if select:
                 unique_times = np.unique(self.time_array)
@@ -2494,33 +2799,6 @@ class UVData(UVBase):
                 self.select(times=times_to_keep, run_check=run_check, check_extra=check_extra,
                             run_check_acceptability=run_check_acceptability,
                             keep_all_metadata=keep_all_metadata)
-
-    def reorder_pols(self, order=None, run_check=True, check_extra=True,
-                     run_check_acceptability=True):
-        """
-        Rearrange polarizations in the event they are not uvfits compatible.
-
-        Args:
-            order: Provide the order which to shuffle the data. Default will
-                sort by absolute value of pol values.
-            run_check: Option to check for the existence and proper shapes of
-                parameters after reordering. Default is True.
-            check_extra: Option to check optional parameters as well as required
-                ones. Default is True.
-            run_check_acceptability: Option to check acceptable range of the values of
-                parameters after reordering. Default is True.
-        """
-        if order is None:
-            order = np.argsort(np.abs(self.polarization_array))
-        self.polarization_array = self.polarization_array[order]
-        self.data_array = self.data_array[:, :, :, order]
-        self.nsample_array = self.nsample_array[:, :, :, order]
-        self.flag_array = self.flag_array[:, :, :, order]
-
-        # check if object is self-consistent
-        if run_check:
-            self.check(check_extra=check_extra,
-                       run_check_acceptability=run_check_acceptability)
 
     def get_ants(self):
         """
@@ -2581,7 +2859,7 @@ class UVData(UVBase):
         """
         Returns list of pols in string format.
         """
-        return uvutils.polnum2str(self.polarization_array)
+        return uvutils.polnum2str(self.polarization_array, x_orientation=self.x_orientation)
 
     def get_antpairpols(self):
         """
@@ -2675,7 +2953,8 @@ class UVData(UVBase):
         key = uvutils._get_iterable(key)
         if type(key) is str:
             # Single string given, assume it is polarization
-            pol_ind1 = np.where(self.polarization_array == uvutils.polstr2num(key))[0]
+            pol_ind1 = np.where(self.polarization_array
+                                == uvutils.polstr2num(key, x_orientation=self.x_orientation))[0]
             if len(pol_ind1) > 0:
                 blt_ind1 = np.arange(self.Nblts, dtype=np.int64)
                 blt_ind2 = np.array([], dtype=np.int64)
@@ -2756,12 +3035,17 @@ class UVData(UVBase):
             if type(key[2]) is str:
                 # pol is str
                 if len(blt_ind1) > 0:
-                    pol_ind1 = np.where(self.polarization_array == uvutils.polstr2num(key[2]))[0]
+                    pol_ind1 = np.where(
+                        self.polarization_array
+                        == uvutils.polstr2num(key[2],
+                                              x_orientation=self.x_orientation))[0]
                 else:
                     pol_ind1 = np.array([], dtype=np.int64)
                 if len(blt_ind2) > 0:
-                    pol_ind2 = np.where(self.polarization_array
-                                        == uvutils.polstr2num(uvutils.conj_pol(key[2])))[0]
+                    pol_ind2 = np.where(
+                        self.polarization_array
+                        == uvutils.polstr2num(uvutils.conj_pol(key[2]),
+                                              x_orientation=self.x_orientation))[0]
                 else:
                     pol_ind2 = np.array([], dtype=np.int64)
             else:
@@ -3142,8 +3426,11 @@ class UVData(UVBase):
                             if pols is not None:
                                 for pol in pols:
                                     if (pol.lower() in pols_data
-                                            and uvutils.polstr2num(pol) not in polarizations):
-                                        polarizations.append(uvutils.polstr2num(pol))
+                                            and uvutils.polstr2num(pol, x_orientation=self.x_orientation)
+                                            not in polarizations):
+                                        polarizations.append(
+                                            uvutils.polstr2num(pol,
+                                                               x_orientation=self.x_orientation))
                                     elif not (pol.lower() in pols_data
                                               or pol in warned_pols):
                                         warned_pols.append(pol)
@@ -3154,8 +3441,11 @@ class UVData(UVBase):
                                         if (self.Npols == 1
                                                 and [pol.lower()] == pols_data):
                                             ant_pairs_nums.remove(ant_tuple)
-                                        if uvutils.polstr2num(pol) in polarizations:
-                                            polarizations.remove(uvutils.polstr2num(pol))
+                                        if uvutils.polstr2num(
+                                                pol, x_orientation=self.x_orientation) in polarizations:
+                                            polarizations.remove(
+                                                uvutils.polstr2num(
+                                                    pol, x_orientation=self.x_orientation))
                                     elif not (pol.lower() in pols_data
                                               or pol in warned_pols):
                                         warned_pols.append(pol)
@@ -3182,7 +3472,7 @@ class UVData(UVBase):
             print('\nParsed polarizations:')
             if polarizations is not None:
                 for pol in polarizations:
-                    print(uvutils.polnum2str(pol))
+                    print(uvutils.polnum2str(pol, x_orientation=self.x_orientation))
 
         if len(warned_ants) > 0:
             warnings.warn('Warning: Antenna number {a} passed, but not present '

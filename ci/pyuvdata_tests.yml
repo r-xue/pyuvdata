@@ -3,13 +3,13 @@ channels:
   - defaults
   - conda-forge
 dependencies:
-  - aipy
   - astropy
   - h5py
   - healpy
   - nose
   - numpy
   - python-casacore
+  - pyyaml
   - scipy
   - six
-  - coveralls
+  - coverage

@@ -3,6 +3,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.8] - 2019-05-01
+
+### Added
+- Optional `x_orientation` parameter to utils functions polstr2num, polnum2str, jstr2num and jnum2str to allow for E/N based polarization strings (rather than just x/y based ones)
+- New optional `x_orientation` parameter on UVBeam (paralleling UVData and UVCal), with read/write support in beamfits
+- Added `x_orientation` as an optional parameter in read_cst_beam and in cst settings yaml files.
+- All str2num or num2str calls on UVData and UVBeam pass the object's x_orientation
+- New `UVData.fast_concat` method to allow fast concatenation of UVData objects (or files) along a particular axis.
+- Added preliminary `UVFlag` module from hera_qm to pyuvdata. Will eventually promote to `UVBase` object, but for now this is undocumented functionality.
+
+### Deprecated
+- Defined 'east' and 'north' as the allowed 'x_orientation' values in UVData and UVCal, Backwards compatiblity support exists for 'E' and 'N' values
+- `UVData.order_pols` method in favor of `UVData.reorder_pols`.
+
+### Fixed
+- Building pyuvdata on macOS now targets minimum macOS 10.9 if run on macOS 10.9 or above
+- Possible bug where `check_variables` dictionary can change size during `read_miriad` call
+
+
+## [1.3.7] - 2019-04-02
+
+### Added
+- Added `add_to_history` kwarg to UVH5.write_uvh5_part
+- `_healpix_interp_bilinear` as a new interpolation method in `UVBeam`
+- `freq_interpolation_kind` added as an attribute to `UVBeam`
+- `tol` added as keyword argument to `UVBeam._interp_freq` which allows for a fast return of `data_array` slice if nearest-neighbor frequencies are all within the distance tolerance.
+- `polarizations` added as keyword argument to `UVBeam` interpolation methods.
+- Support for a yaml settings file to collect and propagate metadata for CST beam files.
+
+### Changed
+- `UVBeam._interp_freq` returns both `interp_data` and `interp_bandpass`, instead of just the former.
+
+### Fixed
+- Combining overlapping data along multiple axes (most common when reading in multiple files) no longer errors.
+
+
 ## [1.3.6] - 2019-02-15
 
 ### Added
@@ -25,6 +61,7 @@ All notable changes to this project will be documented in this file.
 - Convenience functions on UVData for finding redundant baselines (calling the corresponding utils functions)
 - memo describing the UVH5 format
 - read/write support for uvh5 files with integer datatypes for visibilities
+- Option to only do the select on the metadata. This is useful for partially defined objects as in pyuvsim setup or after reading only the metadata from a file.
 - support for python3.7
 
 ### Changed
@@ -36,9 +73,6 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - `_key2inds` now properly reorders polarization axis for conjugated visibilities. This also effects the `get_data` function.
 - long strings are saved correctly in miriad files from python3
-
-### Added
-- Option to only do the select on the metadata. This is useful for partially defined objects as in pyuvsim setup or after reading only the metadata from a file.
 
 ## [1.3.3] - 2018-11-01
 ### Added
@@ -110,11 +144,11 @@ All notable changes to this project will be documented in this file.
 - Fixed a serious bug where data was overwritten in the add functions if the axes were out of canonical order
 - Fixed scrambled data ordering in add function
 
-## [1.2.1] - 2018-11-09
+## [1.2.1] - 2017-11-09
 ### Fixed
 - Fixed a bug in parsing frequencies from CST file names
 
-## [1.2] - 2018-11-08
+## [1.2] - 2017-11-08
 ### Added
 - support doctest in the tutorial
 - utility functions for converting between Jones numbers and polarization strings

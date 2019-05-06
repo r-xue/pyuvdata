@@ -1,7 +1,8 @@
 # pyuvdata
 
 [![Build Status](https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata.svg?branch=master)](https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata)
-[![Coverage Status](https://coveralls.io/repos/github/RadioAstronomySoftwareGroup/pyuvdata/badge.svg?branch=master)](https://coveralls.io/github/RadioAstronomySoftwareGroup/pyuvdata?branch=master)
+[![CircleCI](https://circleci.com/gh/RadioAstronomySoftwareGroup/pyuvdata.svg?style=svg&branch=master)](https://circleci.com/gh/RadioAstronomySoftwareGroup/pyuvdata?branch=master)
+[![codecov](https://codecov.io/gh/RadioAstronomySoftwareGroup/pyuvdata/badge.svg?branch=master)](https://codecov.io/gh/RadioAstronomySoftwareGroup/pyuvdata)
 
 pyuvdata defines a pythonic interface to interferometric data sets. Currently pyuvdata supports reading and writing of miriad, uvfits, and uvh5 files and reading of CASA measurement sets and FHD ([Fast Holographic Deconvolution](https://github.com/EoRImaging/FHD)) visibility save files.
 
@@ -80,6 +81,13 @@ A tutorial with example usage and developer API documentation is hosted on [Read
 # History
 pyuvdata was originally developed in the low frequency 21cm community to support the development of calibration and foreground subtraction pipelines. Particular focus has been paid to supporting drift and phased array modes.
 
+# Citation
+Please cite pyuvdata by citing our JOSS paper:
+
+Hazelton et al, (2017), pyuvdata: an interface for astronomical interferometeric datasets in python, Journal of Open Source Software, 2(10), 140, doi:10.21105/joss.00140
+
+[ADS Link](https://ui.adsabs.harvard.edu/abs/2017JOSS....2..140H); [Bibtex entry](http://adsabs.harvard.edu/cgi-bin/nph-bib_query?bibcode=2017JOSS....2..140H&data_type=BIBTEX&db_key=GEN&nocookieset=1)
+
 # Installation
 For simple installation, the latest stable version is available via conda
 (preferred: ```conda install -c conda-forge pyuvdata```) or pip (```pip install pyuvdata```)
@@ -108,12 +116,13 @@ The numpy and astropy versions are important, so be sure to make sure these are 
 For anaconda users, we suggest using conda to install astropy, numpy, scipy, and optionally h5py, and
 conda-forge for optionally installing python-casacore and healpy (e.g. ```conda install -c conda-forge python-casacore```).
 
-* numpy >= 1.14
+* numpy >= 1.15
 * scipy
 * astropy >= 2.0
 * h5py (optional: for reading and writing uvh5 format)
 * python-casacore (optional: for CASA measurement set reading functionality)
 * healpy (optional: working with beams in HEALPix formats)
+* pyyaml (optional: for working with settings files for CST beam files)
 
 ### For CASA measurement set functionality, install python-casacore
 python-casacore is required in order to use the measurement set capabilities of pyuvdata. python-casacore requires the casacore c++ libraries. To install via conda,  run

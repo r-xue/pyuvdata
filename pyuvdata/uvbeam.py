@@ -7,9 +7,11 @@
 """
 from __future__ import absolute_import, division, print_function
 
+import os
 import numpy as np
 import warnings
 import copy
+import six
 from scipy import interpolate
 
 from .uvbase import UVBase
@@ -40,7 +42,11 @@ class UVBeam(UVBase):
                                    'az, za coordinate axes (for the basis_vector_array) '
                                    'where az runs from East to North'}}
 
-    interpolation_function_dict = {'az_za_simple': '_interp_az_za_rect_spline'}
+    interpolation_function_dict = {
+        'az_za_simple': {'description': 'scipy RectBivariate spline interpolation',
+                         'func': '_interp_az_za_rect_spline'},
+        'healpix_simple': {'description': 'healpy nearest-neighbor bilinear interpolation',
+                           'func': '_interp_healpix_bilinear'}}
 
     def __init__(self):
         """Create a new UVBeam object."""
@@ -155,7 +161,7 @@ class UVBeam(UVBase):
                                                    expected_type=int, form=('Npols',),
                                                    acceptable_vals=list(np.arange(-8, 0)) + list(np.arange(1, 5)))
 
-        desc = 'Array of frequencies, shape (Nspws, Nfreqs), units Hz'
+        desc = 'Array of frequencies, center of the channel, shape (Nspws, Nfreqs), units Hz'
         self._freq_array = uvp.UVParameter('freq_array', description=desc,
                                            form=('Nspws', 'Nfreqs'),
                                            expected_type=np.float,
@@ -284,6 +290,14 @@ class UVBeam(UVBase):
                                                 expected_type=np.complex)
 
         # -------- extra, non-required parameters ----------
+        desc = ('Orientation of the physical dipole corresponding to what is '
+                'labelled as the x polarization. Options are "east" '
+                '(indicating east/west orientation) and "north" (indicating '
+                'north/south orientation)')
+        self._x_orientation = uvp.UVParameter('x_orientation', description=desc,
+                                              required=False, expected_type=str,
+                                              acceptable_vals=['east', 'north'])
+
         desc = ('String indicating interpolation function. Must be set to use '
                 'the interp_* methods. Allowed values are : "'
                 + '", "'.join(list(self.interpolation_function_dict.keys())) + '".')
@@ -292,6 +306,12 @@ class UVBeam(UVBase):
                                                        form='str', expected_type=str,
                                                        description=desc,
                                                        acceptable_vals=list(self.interpolation_function_dict.keys()))
+        desc = ('String indicating frequency interpolation kind. '
+                'See scipy.interpolate.interp1d for details. Default is linear.')
+        self._freq_interp_kind = uvp.UVParameter("freq_interp_kind",
+                                                 required=False, form='str',
+                                                 expected_type=str, description=desc)
+        self.freq_interp_kind = 'linear'
 
         desc = ('Any user supplied extra keywords, type=dict. Keys should be '
                 '8 character or less strings if writing to beam fits files. '
@@ -300,17 +320,13 @@ class UVBeam(UVBase):
                                                description=desc, value={},
                                                spoof_val={}, expected_type=dict)
 
-        desc = ('Reference input impedance of the receiving chain (sets the reference '
-                'for the S parameters), units: Ohms')
-        self._reference_input_impedance = uvp.UVParameter('reference_input_impedance', required=False,
-                                                          description=desc,
-                                                          expected_type=np.float, tols=1e-3)
-
-        desc = ('Reference output impedance of the receiving chain (sets the reference '
-                'for the S parameters), units: Ohms')
-        self._reference_output_impedance = uvp.UVParameter('reference_output_impedance', required=False,
-                                                           description=desc,
-                                                           expected_type=np.float, tols=1e-3)
+        desc = ('Reference impedance of the beam model. The radiated E-farfield '
+                'or the realised gain depend on the impedance of the port used to '
+                'excite the simulation. This is the reference impedance (Z0) of '
+                'the simulation. units: Ohms')
+        self._reference_impedance = uvp.UVParameter('reference_impedance', required=False,
+                                                    description=desc,
+                                                    expected_type=np.float, tols=1e-3)
 
         desc = 'Array of receiver temperatures, shape (Nspws, Nfreqs), units K'
         self._receiver_temperature_array = \
@@ -581,7 +597,8 @@ class UVBeam(UVBase):
 
         pol_strings = ['pI', 'pQ', 'pU', 'pV']
         power_data = np.zeros((1, 1, len(pol_strings), _sh[-2], _sh[-1]), dtype=np.complex)
-        beam_object.polarization_array = np.array([uvutils.polstr2num(ps.upper()) for ps in pol_strings])
+        beam_object.polarization_array = np.array(
+            [uvutils.polstr2num(ps.upper(), x_orientation=self.x_orientation) for ps in pol_strings])
 
         for fq_i in range(Nfreqs):
             jones = np.zeros((_sh[-1], 2, 2), dtype=np.complex)
@@ -597,7 +614,8 @@ class UVBeam(UVBase):
         if self.pixel_coordinate_system != 'healpix':
             power_data = power_data.reshape(power_data.shape[:-1] + (Naxes2, Naxes1))
         beam_object.data_array = power_data
-        beam_object.polarization_array = np.array([uvutils.polstr2num(ps.upper()) for ps in pol_strings])
+        beam_object.polarization_array = np.array(
+            [uvutils.polstr2num(ps.upper(), x_orientation=self.x_orientation) for ps in pol_strings])
         beam_object.Naxes_vec = 1
         beam_object.set_power()
 
@@ -663,7 +681,8 @@ class UVBeam(UVBase):
         pol_strings = []
         for pair in feed_pol_order:
             pol_strings.append(beam_object.feed_array[pair[0]] + beam_object.feed_array[pair[1]])
-        beam_object.polarization_array = np.array([uvutils.polstr2num(ps.upper()) for ps in pol_strings])
+        beam_object.polarization_array = np.array(
+            [uvutils.polstr2num(ps.upper(), x_orientation=self.x_orientation) for ps in pol_strings])
 
         if not keep_basis_vector:
             beam_object.Naxes_vec = 1
@@ -718,61 +737,92 @@ class UVBeam(UVBase):
         if not inplace:
             return beam_object
 
-    def _interp_freq(self, freq_array):
+    def _interp_freq(self, freq_array, kind='linear', tol=1.0, new_object=False):
         """
         Simple interpolation function for frequency axis.
 
         Args:
-            freq_array: frequency values to interpolate to
+            freq_array: frequency values [Hz] to interpolate to
+            kind: str, interpolation method, see scipy.interpolate.interp1d
+            tol: float, frequency distance tolerance [Hz] of nearest neighbors.
+                If *all* elements in freq_array have nearest neighbor distances within
+                the specified tolerance then return the beam at each nearest neighbor,
+                otherwise interpolate the beam.
+            new_object: bool, if True return a new UVBeam object, else return just the interpolated data
 
         Returns:
-            an array of interpolated values, shape: (Naxes_vec, Nspws, Nfeeds or Npols, freq_array.size, Npixels or (Naxis2, Naxis1))
-            an array of distances from nearest frequency, shape: (freq_array.size)
+            interpolated beam values, or UVBeam object if new_object==True
+                shape: (Naxes_vec, Nspws, Nfeeds or Npols, freq_array.size, Npixels or (Naxis2, Naxis1))
+            interpolated bandpass values or None if new_object==True
+                shape: (Nspws, freq_array.size)
         """
         assert(isinstance(freq_array, np.ndarray))
         assert(freq_array.ndim == 1)
 
         nfreqs = freq_array.size
 
-        for f_i in range(nfreqs):
-            freq_dists = self.freq_array[0, :] - freq_array[f_i]
+        # get frequency distances
+        freq_dists = np.abs(self.freq_array - freq_array.reshape(-1, 1))
+        nearest_dist = np.min(freq_dists, axis=1)
+        nearest_inds = np.argmin(freq_dists, axis=1)
+        interp_bool = np.any(nearest_dist >= tol)
 
-        if self.Nfreqs == 1:
-            raise ValueError('Only one frequency in UVBeam so cannot interpolate.')
+        # use the beam at nearest neighbors if not interp_bool
+        if not interp_bool:
+            interp_arrays = [self.data_array[:, :, :, nearest_inds, :], self.bandpass_array[:, nearest_inds]]
+            kind = 'nearest'
 
-        if np.iscomplexobj(self.data_array):
-            data_type = np.complex
+        # otherwise interpolate the beam
         else:
-            data_type = np.float
-        interp_data_shape = np.array(self.data_array.shape)
-        interp_data_shape[3] = nfreqs
-        interp_data = np.zeros(interp_data_shape, dtype=data_type)
+            if self.Nfreqs == 1:
+                raise ValueError('Only one frequency in UVBeam so cannot interpolate.')
 
-        if (np.min(freq_array) < np.min(self.freq_array) or np.max(freq_array) > np.max(self.freq_array)):
-            raise ValueError('at least one interpolation frequency is outside of '
-                             'the UVBeam freq_array range.')
+            if (np.min(freq_array) < np.min(self.freq_array) or np.max(freq_array) > np.max(self.freq_array)):
+                raise ValueError('at least one interpolation frequency is outside of '
+                                 'the UVBeam freq_array range.')
 
-        def get_lambda(real_lut, imag_lut=None):
-            # Returns function objects for interpolation reuse
-            if imag_lut is None:
-                return lambda freqs: real_lut(freqs)
-            else:
-                return lambda freqs: (real_lut(freqs) + 1j * imag_lut(freqs))
+            def get_lambda(real_lut, imag_lut=None):
+                # Returns function objects for interpolation reuse
+                if imag_lut is None:
+                    return lambda freqs: real_lut(freqs)
+                else:
+                    return lambda freqs: (real_lut(freqs) + 1j * imag_lut(freqs))
 
-        if np.iscomplexobj(self.data_array):
-            # interpolate real and imaginary parts separately
-            real_lut = interpolate.interp1d(self.freq_array[0, :], self.data_array.real, axis=3)
-            imag_lut = interpolate.interp1d(self.freq_array[0, :], self.data_array.imag, axis=3)
-            lut = get_lambda(real_lut, imag_lut)
+            interp_arrays = []
+            for data, ax in zip([self.data_array, self.bandpass_array], [3, 1]):
+                if np.iscomplexobj(data):
+                    # interpolate real and imaginary parts separately
+                    real_lut = interpolate.interp1d(self.freq_array[0, :], data.real, kind=kind, axis=ax)
+                    imag_lut = interpolate.interp1d(self.freq_array[0, :], data.imag, kind=kind, axis=ax)
+                    lut = get_lambda(real_lut, imag_lut)
+                else:
+                    lut = interpolate.interp1d(self.freq_array[0, :], data, axis=ax)
+                    lut = get_lambda(lut)
+
+                interp_arrays.append(lut(freq_array))
+
+        # return just the interpolated arrays
+        if not new_object:
+            return tuple(interp_arrays)
+
+        # return a new UVBeam object with interpolated data
         else:
-            lut = interpolate.interp1d(self.freq_array[0, :], self.data_array, axis=3)
-            lut = get_lambda(lut)
+            # make a new object
+            new_uvb = self.select(freq_chans=np.arange(np.min([self.Nfreqs, len(freq_array)])), inplace=False)
+            new_uvb.data_array = interp_arrays[0]
+            new_uvb.Nfreqs = new_uvb.data_array.shape[3]
+            new_uvb.freq_array = freq_array.reshape(1, -1)
+            new_uvb.bandpass_array = interp_arrays[1]
+            new_uvb.freq_interp_kind = kind
+            if hasattr(new_uvb, 'saved_interp_functions'):
+                delattr(new_uvb, 'saved_interp_functions')
 
-        interp_data = lut(freq_array)
+            new_uvb.check()
 
-        return interp_data
+            return new_uvb, None
 
-    def _interp_az_za_rect_spline(self, az_array, za_array, freq_array, reuse_spline=False):
+    def _interp_az_za_rect_spline(self, az_array, za_array, freq_array, freq_interp_kind='linear',
+                                  freq_interp_tol=1.0, reuse_spline=False, polarizations=None, **kwargs):
         """
         Simple interpolation function for az_za coordinate system.
 
@@ -780,7 +830,14 @@ class UVBeam(UVBase):
             az_array: az values to interpolate to (same length as za_array)
             za_array: za values to interpolate to (same length as az_array)
             freq_array: frequency values to interpolate to
+            freq_interp_kind: str, interpolation method across frequency. See scipy.interpolate.interp1d for details.
+            freq_interp_tol: float, frequency distance tolerance [Hz] of nearest neighbors.
+                If *all* elements in freq_array have nearest neighbor distances within
+                the specified tolerance then return the beam at each nearest neighbor,
+                otherwise interpolate the beam.
             reuse_spline: Save the interpolation functions for reuse.
+            polarizations: list of str, polarizations to interpolate if beam_type is 'power'.
+                Default is all polarizations in self.polarization_array.
 
         Returns:
             an array of interpolated values, shape: (Naxes_vec, Nspws, Nfeeds or Npols, Nfreqs, az_array.size)
@@ -794,13 +851,14 @@ class UVBeam(UVBase):
 
         if freq_array is not None:
             assert(isinstance(freq_array, np.ndarray))
-            input_data_array = self._interp_freq(freq_array)
+            input_data_array, _ = self._interp_freq(freq_array, kind=freq_interp_kind, tol=freq_interp_tol)
             input_nfreqs = freq_array.size
         else:
             input_data_array = self.data_array
             input_nfreqs = self.Nfreqs
             freq_array = self.freq_array[0]
-        if az_array is None:
+
+        if az_array is None or za_array is None:
             return input_data_array, self.basis_vector_array
 
         assert(isinstance(az_array, np.ndarray))
@@ -822,12 +880,6 @@ class UVBeam(UVBase):
             data_type = np.complex
         else:
             data_type = np.float
-
-        if self.beam_type == 'efield':
-            data_shape = (self.Naxes_vec, self.Nspws, self.Nfeeds, input_nfreqs, npoints)
-        else:
-            data_shape = (self.Naxes_vec, self.Nspws, self.Npols, input_nfreqs, npoints)
-        interp_data = np.zeros(data_shape, dtype=data_type)
 
         if self.basis_vector_array is not None:
             if (np.any(self.basis_vector_array[0, 1, :] > 0)
@@ -858,9 +910,26 @@ class UVBeam(UVBase):
 
         # Npols is only defined for power beams.  For E-field beams need Nfeeds.
         if self.beam_type == 'power':
-            Npol_feeds = self.Npols
+            # get requested polarization indices
+            if polarizations is None:
+                Npol_feeds = self.Npols
+                pol_inds = np.arange(Npol_feeds)
+            else:
+                pols = [uvutils.polstr2num(p, x_orientation=self.x_orientation) for p in polarizations]
+                pol_inds = []
+                for pol in pols:
+                    if pol not in self.polarization_array:
+                        raise ValueError("Requested polarization {} not found in self.polarization_array".format(pol))
+                    pol_inds.append(np.where(self.polarization_array == pol)[0][0])
+                pol_inds = np.asarray(pol_inds)
+                Npol_feeds = len(pol_inds)
+
         else:
             Npol_feeds = self.Nfeeds
+            pol_inds = np.arange(Npol_feeds)
+
+        data_shape = (self.Naxes_vec, self.Nspws, Npol_feeds, input_nfreqs, npoints)
+        interp_data = np.zeros(data_shape, dtype=data_type)
 
         for index1 in range(self.Nspws):
             for index3 in range(input_nfreqs):
@@ -868,8 +937,8 @@ class UVBeam(UVBase):
                 if reuse_spline:
                     luts = np.empty((self.Naxes_vec, self.Nspws, Npol_feeds), dtype=object)
                 for index0 in range(self.Naxes_vec):
-                    for index2 in range(Npol_feeds):
-                        if reuse_spline and freq in self.saved_interp_functions.keys():
+                    for index2 in pol_inds:
+                        if reuse_spline and freq in self.saved_interp_functions.keys() and self.saved_interp_functions[freq].shape == (self.Naxes_vec, self.Nspws, Npol_feeds):
                             lut = self.saved_interp_functions[freq][index0, index1, index2]
                         else:
                             if np.iscomplexobj(input_data_array):
@@ -902,7 +971,120 @@ class UVBeam(UVBase):
 
         return interp_data, interp_basis_vector
 
-    def interp(self, az_array=None, za_array=None, freq_array=None, reuse_spline=False):
+    def _interp_healpix_bilinear(self, az_array, za_array, freq_array, freq_interp_kind='linear',
+                                 freq_interp_tol=1.0, polarizations=None, **kwargs):
+        """
+        Simple bi-linear interpolation wrapper for healpix.
+
+        Args:
+            az_array: azimuth angles to interpolate to [radians]
+            za_array: zenith angles to interpolate to [radians]
+            freq_array: frequency values to interpolate to [Hz]
+            freq_interp_kind: str, interpolation method across frequency. See scipy.interpolate.interp1d for details.
+            freq_interp_tol: float, frequency distance tolerance [Hz] of nearest neighbors.
+                If *all* elements in freq_array have nearest neighbor distances within
+                the specified tolerance then return the beam at each nearest neighbor,
+                otherwise interpolate the beam.
+            polarizations: list of str, polarizations to interpolate if beam_type is 'power'.
+                Default is all polarizations in self.polarization_array.
+
+        Returns:
+            an array of interpolated values, shape: (Naxes_vec, Nspws, Nfeeds or Npols, Nfreqs, az_array.size)
+            an array of interpolated basis vectors, shape: (Naxes_vec, Ncomponents_vec, az_array.size)
+        """
+        try:
+            import healpy as hp
+        except ImportError:  # pragma: no cover
+            uvutils._reraise_context('healpy is not installed but is required for '
+                                     'healpix functionality')
+
+        if self.pixel_coordinate_system != 'healpix':
+            raise ValueError('pixel_coordinate_system must be "healpix"')
+
+        if freq_array is not None:
+            assert(isinstance(freq_array, np.ndarray))
+            input_data_array, _ = self._interp_freq(freq_array, kind=freq_interp_kind, tol=freq_interp_tol)
+            input_nfreqs = freq_array.size
+        else:
+            input_data_array = self.data_array
+            input_nfreqs = self.Nfreqs
+            freq_array = self.freq_array[0]
+
+        if az_array is None or za_array is None:
+            return input_data_array, self.basis_vector_array
+
+        assert(isinstance(az_array, np.ndarray))
+        assert(isinstance(za_array, np.ndarray))
+        assert(az_array.ndim == 1)
+        assert(az_array.shape == za_array.shape)
+
+        npoints = az_array.size
+
+        # Npols is only defined for power beams.  For E-field beams need Nfeeds.
+        if self.beam_type == 'power':
+            # get requested polarization indices
+            if polarizations is None:
+                Npol_feeds = self.Npols
+                pol_inds = np.arange(Npol_feeds)
+            else:
+                pols = [uvutils.polstr2num(p, x_orientation=self.x_orientation) for p in polarizations]
+                pol_inds = []
+                for pol in pols:
+                    if pol not in self.polarization_array:
+                        raise ValueError("Requested polarization {} not found in self.polarization_array".format(pol))
+                    pol_inds.append(np.where(self.polarization_array == pol)[0][0])
+                pol_inds = np.asarray(pol_inds)
+                Npol_feeds = len(pol_inds)
+        else:
+            Npol_feeds = self.Nfeeds
+            pol_inds = np.arange(Npol_feeds)
+
+        if np.iscomplexobj(input_data_array):
+            data_type = np.complex
+        else:
+            data_type = np.float
+        interp_data = np.zeros((self.Naxes_vec, self.Nspws, Npol_feeds, input_nfreqs, len(az_array)), dtype=data_type)
+
+        if self.basis_vector_array is not None:
+            if (np.any(self.basis_vector_array[0, 1, :] > 0)
+                    or np.any(self.basis_vector_array[1, 0, :] > 0)):
+                """ Input basis vectors are not aligned to the native theta/phi
+                coordinate system """
+                raise NotImplementedError('interpolation for input basis '
+                                          'vectors that are not aligned to the '
+                                          'native theta/phi coordinate system '
+                                          'is not yet supported')
+            else:
+                """ The basis vector array comes in defined at the rectangular grid.
+                Redefine it for the interpolation points """
+                interp_basis_vector = np.zeros([self.Naxes_vec,
+                                                self.Ncomponents_vec,
+                                                npoints])
+                interp_basis_vector[0, 0, :] = np.ones(npoints)  # theta hat
+                interp_basis_vector[1, 1, :] = np.ones(npoints)  # phi hat
+        else:
+            interp_basis_vector = None
+
+        for index1 in range(self.Nspws):
+            for index3 in range(input_nfreqs):
+                freq = freq_array[index3]
+                for index0 in range(self.Naxes_vec):
+                    for index2 in range(Npol_feeds):
+                        if np.iscomplexobj(input_data_array):
+                            # interpolate real and imaginary parts separately
+                            real_hmap = hp.get_interp_val(input_data_array[index0, index1, pol_inds[index2], index3, :].real, za_array, az_array)
+                            imag_hmap = hp.get_interp_val(input_data_array[index0, index1, pol_inds[index2], index3, :].imag, za_array, az_array)
+                            hmap = real_hmap + 1j * imag_hmap
+                        else:
+                            # interpolate once
+                            hmap = hp.get_interp_val(input_data_array[index0, index1, pol_inds[index2], index3, :], za_array, az_array)
+
+                        interp_data[index0, index1, index2, index3, :] = hmap
+
+        return interp_data, interp_basis_vector
+
+    def interp(self, az_array=None, za_array=None, freq_array=None, freq_interp_tol=1.0,
+               polarizations=None, freq_interp_kind='linear', reuse_spline=False):
         """
         Interpolate beam to given az, za locations (in radians).
 
@@ -910,6 +1092,14 @@ class UVBeam(UVBase):
             az_array: az values to interpolate to (same length as za_array)
             za_array: za values to interpolate to (same length as az_array)
             freq_array: frequency values to interpolate to
+            freq_interp_tol: float, frequency distance tolerance [Hz] of nearest neighbors.
+                If *all* elements in freq_array have nearest neighbor distances within
+                the specified tolerance then return the beam at each nearest neighbor,
+                otherwise interpolate the beam.
+            polarizations: list of str, polarizations to interpolate if beam_type is 'power'.
+                Default is all polarizations in self.polarization_array.
+            freq_interp_kind: str, interpolation method across frequency. See scipy.interpolate.interp1d for details.
+            reuse_spline: Save the interpolation functions for reuse. Only applies for `az_za_simple` interpolation.
 
         Returns:
             an array of interpolated values, shape: (Naxes_vec, Nspws, Nfeeds or Npols,
@@ -921,9 +1111,15 @@ class UVBeam(UVBase):
         """
         if self.interpolation_function is None:
             raise ValueError('interpolation_function must be set on object first')
+        if self.freq_interp_kind is None:
+            raise ValueError('freq_interp_kind must be set on object first')
 
-        interp_func = self.interpolation_function_dict[self.interpolation_function]
-        return getattr(self, interp_func)(az_array, za_array, freq_array, reuse_spline)
+        interp_func = self.interpolation_function_dict[self.interpolation_function]['func']
+        return getattr(self, interp_func)(az_array, za_array, freq_array,
+                                          freq_interp_kind=self.freq_interp_kind,
+                                          freq_interp_tol=freq_interp_tol,
+                                          polarizations=polarizations,
+                                          reuse_spline=reuse_spline)
 
     def to_healpix(self, nside=None, run_check=True, check_extra=True,
                    run_check_acceptability=True,
@@ -1414,7 +1610,7 @@ class UVBeam(UVBase):
         assert self.pixel_coordinate_system == 'healpix', "pixel_coordinate_system must be healpix"
         # assert type is int, not string
         if isinstance(pol, (str, np.str)):
-            pol = uvutils.polstr2num(pol)
+            pol = uvutils.polstr2num(pol, x_orientation=self.x_orientation)
         pol_array = self.polarization_array
         if pol in pol_array:
             stokes_p_ind = np.where(np.isin(pol_array, pol))[0][0]
@@ -1439,7 +1635,7 @@ class UVBeam(UVBase):
           omega : float, integral of the beam across the sky [steradians]
         """
         if isinstance(pol, (str, np.str)):
-            pol = uvutils.polstr2num(pol)
+            pol = uvutils.polstr2num(pol, x_orientation=self.x_orientation)
         if self.beam_type != 'power':
             raise ValueError('beam_type must be power')
         if self.Naxes_vec > 1:
@@ -1474,7 +1670,7 @@ class UVBeam(UVBase):
           omega : float, integral of the beam^2 across the sky [steradians]
         """
         if isinstance(pol, (str, np.str)):
-            pol = uvutils.polstr2num(pol)
+            pol = uvutils.polstr2num(pol, x_orientation=self.x_orientation)
         if self.beam_type != 'power':
             raise ValueError('beam_type must be power')
         if self.Naxes_vec > 1:
@@ -1817,34 +2013,79 @@ class UVBeam(UVBase):
                                     clobber=clobber)
         del(beamfits_obj)
 
-    def read_cst_beam(self, filename, beam_type='power', feed_pol='x', rotate_pol=None,
+    def _read_cst_beam_yaml(self, filename):
+        import yaml
+
+        with open(filename, 'r') as file:
+            settings_dict = yaml.safe_load(file)
+
+        required_keys = ['telescope_name', 'feed_name', 'feed_version',
+                         'model_name', 'model_version', 'history', 'frequencies',
+                         'filenames', 'feed_pol']
+
+        for key in required_keys:
+            if key not in settings_dict:
+                raise ValueError('{key} is a required key in CST settings files '
+                                 'but is not present.'.format(key=key))
+
+        return settings_dict
+
+    def read_cst_beam(self, filename, beam_type='power', feed_pol=None, rotate_pol=None,
                       frequency=None, telescope_name=None, feed_name=None,
                       feed_version=None, model_name=None, model_version=None,
-                      history='', run_check=True, check_extra=True,
-                      run_check_acceptability=True):
+                      history=None, x_orientation=None, reference_impedance=None,
+                      extra_keywords=None, frequency_select=None, run_check=True,
+                      check_extra=True, run_check_acceptability=True):
         """
         Read in data from a cst file.
 
         Args:
-            filename: The cst file or list of files to read from. If a list is passed,
+            filename (str): Either a settings yaml file or a cst text file or
+                list of cst text files to read from. If a list is passed,
                 the files are combined along the appropriate axes.
-            beam_type: what beam_type to read in ('power' or 'efield'). Defaults to 'power'.
-            feed_pol: the feed or polarization or list of feeds or polarizations the files correspond to.
+                Settings yaml files must include the following keywords:
+                    |  - telescope_name (str)
+                    |  - feed_name (str)
+                    |  - feed_version (str)
+                    |  - model_name (str)
+                    |  - model_version (str)
+                    |  - history (str)
+                    |  - frequencies (list(float))
+                    |  - cst text filenames (list(str)) -- path relative to yaml file location
+                    |  - feed_pol (str) or (list(str))
+                and they may include the following optional keywords:
+                    |  - x_orientation (str): Optional but strongly encouraged!
+                    |  - ref_imp (float): beam model reference impedance
+                    |  - sim_beam_type (str): e.g. 'E-farfield'
+                    |  - all other fields will go into the extra_keywords attribute
+                More details and an example are available in the docs (cst_settings_yaml.rst).
+                Specifying any of the associated keywords to this function will
+                override the values in the settings file.
+            beam_type (str): what beam_type to read in ('power' or 'efield'). Defaults to 'power'.
+            feed_pol (str): the feed or polarization or list of feeds or polarizations the files correspond to.
                 Defaults to 'x' (meaning x for efield or xx for power beams).
-            rotate_pol: If True, assume the structure in the simulation is symmetric under
+            rotate_pol (bool): If True, assume the structure in the simulation is symmetric under
                 90 degree rotations about the z-axis (so that the y polarization can be
                 constructed by rotating the x polarization or vice versa).
-                Default: True if feed_pol is a single value, False if it is a list.
-            frequency: the frequency or list of frequencies corresponding to the filename(s).
-                This is assumed to be in the same order as the files, so if it's used,
-                make sure the files are an ordered datatype.
+                Default: True if feed_pol is a single value or a list with all
+                the same values in it, False if it is a list with varying values.
+            frequency (list(float)): the frequency or list of frequencies corresponding to the filename(s).
+                This is assumed to be in the same order as the files.
                 If not passed, the code attempts to parse it from the filenames.
-            telescope_name: the name of the telescope corresponding to the filename(s).
-            feed_name: the name of the feed corresponding to the filename(s).
-            feed_version: the version of the feed corresponding to the filename(s).
-            model_name: the name of the model corresponding to the filename(s).
-            model_version: the version of the model corresponding to the filename(s).
-            history: A string detailing the history of the filename(s).
+            telescope_name (str): the name of the telescope corresponding to the filename(s).
+            feed_name (str): the name of the feed corresponding to the filename(s).
+            feed_version (str): the version of the feed corresponding to the filename(s).
+            model_name (str): the name of the model corresponding to the filename(s).
+            model_version (str): the version of the model corresponding to the filename(s).
+            history (str): A string detailing the history of the filename(s).
+            x_orientation (str): Orientation of the physical dipole corresponding to what is
+                labelled as the x polarization. Options are "east" (indicating
+                east/west orientation) and "north" (indicating north/south orientation)
+            reference_impedance (float): The reference impedance of the model(s).
+            extra_keywords (dict): a dictionary containing any extra_keywords.
+            frequency_select (list(float)):
+                Only used if the file is a yaml file. Indicates which frequencies
+                to include (only read in files for those frequencies)
             run_check: Option to check for the existence and proper shapes of
                 required parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as
@@ -1860,6 +2101,102 @@ class UVBeam(UVBase):
         if isinstance(filename, (list, tuple)):
             if len(filename) == 1:
                 filename = filename[0]
+
+        if not isinstance(filename, (list, tuple)) and filename.endswith('yaml'):
+            settings_dict = self._read_cst_beam_yaml(filename)
+            yaml_dir = os.path.dirname(filename)
+            cst_filename = [os.path.join(yaml_dir, f) for f in settings_dict['filenames']]
+
+            overriding_keywords = {'feed_pol': feed_pol,
+                                   'frequency': frequency,
+                                   'telescope_name': telescope_name,
+                                   'feed_name': feed_name,
+                                   'feed_version': feed_version,
+                                   'model_name': model_name,
+                                   'model_version': model_version,
+                                   'history': history}
+            if 'ref_imp' in settings_dict:
+                overriding_keywords['reference_impedance'] = reference_impedance
+            if 'x_orientation' in settings_dict:
+                overriding_keywords['x_orientation'] = reference_impedance
+            for key, val in six.iteritems(overriding_keywords):
+                if val is not None:
+                    warnings.warn('The {key} keyword is set, overriding the '
+                                  'value in the settings yaml file.'.format(key=key))
+
+            if feed_pol is None:
+                feed_pol = settings_dict['feed_pol']
+            if frequency is None:
+                frequency = settings_dict['frequencies']
+            if telescope_name is None:
+                telescope_name = settings_dict['telescope_name']
+            if feed_name is None:
+                feed_name = settings_dict['feed_name']
+            if feed_version is None:
+                feed_version = str(settings_dict['feed_version'])
+            if model_name is None:
+                model_name = settings_dict['model_name']
+            if model_version is None:
+                model_version = str(settings_dict['model_version'])
+            if history is None:
+                history = settings_dict['history']
+            if reference_impedance is None and 'ref_imp' in settings_dict:
+                reference_impedance = float(settings_dict['ref_imp'])
+            if x_orientation is None and 'x_orientation' in settings_dict:
+                x_orientation = settings_dict['x_orientation']
+
+            if extra_keywords is None:
+                extra_keywords = {}
+
+            known_keys = ['telescope_name', 'feed_name', 'feed_version',
+                          'model_name', 'model_version', 'history', 'frequencies',
+                          'filenames', 'feed_pol', 'ref_imp', 'x_orientation']
+            # One of the standard paramters in the settings yaml file is longer than 8 characters.
+            # This causes warnings and straight truncation when writing to beamfits files
+            # To avoid these, this defines a standard renaming of that paramter
+            rename_extra_keys_map = {'sim_beam_type': 'sim_type'}
+            for key, value in six.iteritems(settings_dict):
+                if key not in known_keys:
+                    if key in rename_extra_keys_map.keys():
+                        extra_keywords[rename_extra_keys_map[key]] = value
+                    else:
+                        extra_keywords[key] = value
+
+            if frequency_select is not None:
+                freq_inds = []
+                for freq in frequency_select:
+                    freq_array = np.array(frequency, dtype=np.float64)
+                    close_inds = np.where(np.isclose(freq_array, freq, rtol=self._freq_array.tols[0],
+                                          atol=self._freq_array.tols[1]))[0]
+                    if close_inds.size > 0:
+                        for ind in close_inds:
+                            freq_inds.append(ind)
+                    else:
+                        raise ValueError('frequency {f} not in frequency list'.format(f=freq))
+                freq_inds = np.array(freq_inds)
+                frequency = freq_array[freq_inds].tolist()
+                cst_filename = np.array(cst_filename)[freq_inds].tolist()
+                if len(cst_filename) == 1:
+                    cst_filename = cst_filename[0]
+                if isinstance(feed_pol, list):
+                    if rotate_pol is None:
+                        # if a mix of feed pols, don't rotate by default
+                        # do this here in case selections confuse this test
+                        if np.any(np.array(feed_pol) != feed_pol[0]):
+                            rotate_pol = False
+                        else:
+                            rotate_pol = True
+                    feed_pol = np.array(feed_pol)[freq_inds].tolist()
+
+        else:
+            cst_filename = filename
+
+        if feed_pol is None:
+            # default to x (done here in case it's specified in a yaml file)
+            feed_pol = 'x'
+        if history is None:
+            # default to empty (done here in case it's specified in a yaml file)
+            history = ''
 
         if isinstance(frequency, np.ndarray):
             if len(frequency.shape) > 1:
@@ -1877,10 +2214,10 @@ class UVBeam(UVBase):
             if len(feed_pol) == 1:
                 feed_pol = feed_pol[0]
 
-        if isinstance(filename, (list, tuple)):
+        if isinstance(cst_filename, (list, tuple)):
             if frequency is not None:
                 if isinstance(frequency, (list, tuple)):
-                    if not len(frequency) == len(filename):
+                    if not len(frequency) == len(cst_filename):
                         raise ValueError('If frequency and filename are both '
                                          'lists they need to be the same length')
                     freq = frequency[0]
@@ -1890,12 +2227,16 @@ class UVBeam(UVBase):
                 freq = None
 
             if isinstance(feed_pol, (list, tuple)):
-                if not len(feed_pol) == len(filename):
+                if not len(feed_pol) == len(cst_filename):
                     raise ValueError('If feed_pol and filename are both '
                                      'lists they need to be the same length')
                 pol = feed_pol[0]
                 if rotate_pol is None:
-                    rotate_pol = False
+                    # if a mix of feed pols, don't rotate by default
+                    if np.any(np.array(feed_pol) != feed_pol[0]):
+                        rotate_pol = False
+                    else:
+                        rotate_pol = True
             else:
                 pol = feed_pol
                 if rotate_pol is None:
@@ -1904,7 +2245,7 @@ class UVBeam(UVBase):
                 raise ValueError('frequency can not be a nested list')
             if isinstance(pol, (list, tuple)):
                 raise ValueError('feed_pol can not be a nested list')
-            self.read_cst_beam(filename[0], beam_type=beam_type,
+            self.read_cst_beam(cst_filename[0], beam_type=beam_type,
                                feed_pol=pol, rotate_pol=rotate_pol,
                                frequency=freq,
                                telescope_name=telescope_name,
@@ -1912,10 +2253,13 @@ class UVBeam(UVBase):
                                feed_version=feed_version,
                                model_name=model_name,
                                model_version=model_version,
-                               history=history, run_check=run_check,
-                               check_extra=check_extra,
+                               history=history,
+                               x_orientation=x_orientation,
+                               reference_impedance=reference_impedance,
+                               extra_keywords=extra_keywords,
+                               run_check=run_check, check_extra=check_extra,
                                run_check_acceptability=run_check_acceptability)
-            for file_i, f in enumerate(filename[1:]):
+            for file_i, f in enumerate(cst_filename[1:]):
                 if isinstance(f, (list, tuple)):
                     raise ValueError('filename can not be a nested list')
 
@@ -1938,8 +2282,11 @@ class UVBeam(UVBase):
                                     feed_version=feed_version,
                                     model_name=model_name,
                                     model_version=model_version,
-                                    history=history, run_check=run_check,
-                                    check_extra=check_extra,
+                                    history=history,
+                                    x_orientation=x_orientation,
+                                    reference_impedance=reference_impedance,
+                                    extra_keywords=extra_keywords,
+                                    run_check=run_check, check_extra=check_extra,
                                     run_check_acceptability=run_check_acceptability)
                 self += beam2
             del(beam2)
@@ -1951,7 +2298,7 @@ class UVBeam(UVBase):
             if rotate_pol is None:
                 rotate_pol = True
             cst_beam_obj = cst_beam.CSTBeam()
-            cst_beam_obj.read_cst_beam(filename, beam_type=beam_type,
+            cst_beam_obj.read_cst_beam(cst_filename, beam_type=beam_type,
                                        feed_pol=feed_pol, rotate_pol=rotate_pol,
                                        frequency=frequency,
                                        telescope_name=telescope_name,
@@ -1959,8 +2306,11 @@ class UVBeam(UVBase):
                                        feed_version=feed_version,
                                        model_name=model_name,
                                        model_version=model_version,
-                                       history=history, run_check=run_check,
-                                       check_extra=check_extra,
+                                       history=history,
+                                       x_orientation=x_orientation,
+                                       reference_impedance=reference_impedance,
+                                       extra_keywords=extra_keywords,
+                                       run_check=run_check, check_extra=check_extra,
                                        run_check_acceptability=run_check_acceptability)
             self._convert_from_filetype(cst_beam_obj)
             del(cst_beam_obj)

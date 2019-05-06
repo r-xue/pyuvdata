@@ -594,7 +594,7 @@ class UVH5(UVData):
     def write_uvh5(self, filename, run_check=True, check_extra=True,
                    run_check_acceptability=True, clobber=False,
                    data_compression=None, flags_compression="lzf", nsample_compression="lzf",
-                   data_write_dtype=None):
+                   data_write_dtype=None, add_to_history=None):
         """
         Write an in-memory UVData object to a UVH5 file.
 
@@ -606,7 +606,8 @@ class UVH5(UVData):
                 ones. Default is True.
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters before writing the file. Default is True.
-            clobber: Option to overwrite the file if it already exists. Default is False.
+            clobber: Option to overwrite the file if it already exists.
+                Default is False. If False and file exists, raises an IOError.
             data_compression: HDF5 filter to apply when writing the data_array. Default is
                  None (no filter/compression).
             flags_compression: HDF5 filter to apply when writing the flags_array. Default is
@@ -642,7 +643,7 @@ class UVH5(UVData):
             if clobber:
                 print("File exists; clobbering")
             else:
-                raise ValueError("File exists; skipping")
+                raise IOError("File exists; skipping")
 
         # open file for writing
         with h5py.File(filename, 'w') as f:
@@ -684,7 +685,8 @@ class UVH5(UVData):
 
         Args:
             filename: The UVH5 file to write to.
-            clobber: Option to overwrite the file if it already exists. Default is False.
+            clobber: Option to overwrite the file if it already exists.
+                Default is False. If False and file exists, raises an IOError.
             data_compression: HDF5 filter to apply when writing the data_array. Default is
                  None (no filter/compression).
             flags_compression: HDF5 filter to apply when writing the flags_array. Default is
@@ -722,7 +724,7 @@ class UVH5(UVData):
             if clobber:
                 print("File exists; clobbering")
             else:
-                raise ValueError("File exists; skipping")
+                raise IOError("File exists; skipping")
 
         # write header and empty arrays to file
         with h5py.File(filename, 'w') as f:
@@ -806,7 +808,7 @@ class UVH5(UVData):
     def write_uvh5_part(self, filename, data_array, flags_array, nsample_array, check_header=True,
                         antenna_nums=None, antenna_names=None, ant_str=None, bls=None,
                         frequencies=None, freq_chans=None, times=None, polarizations=None,
-                        blt_inds=None, run_check_acceptability=True):
+                        blt_inds=None, run_check_acceptability=True, add_to_history=None):
         """
         Write out a part of a UVH5 file that has been previously initialized.
 
@@ -858,6 +860,7 @@ class UVH5(UVData):
             polarizations: The polarizations to include when writing data to the file.
             blt_inds: The baseline-time indices to include when writing data to the file.
                 This is not commonly used.
+            add_to_history: String to append to history before write out. Default is no appending.
 
         Returns:
             None
@@ -1021,5 +1024,13 @@ class UVH5(UVData):
                                 visdata_dset[blt_idx, :, freq_idx, pol_idx] = data_array[iblt, :, ifreq, ipol]
                             flags_dset[blt_idx, :, freq_idx, pol_idx] = flags_array[iblt, :, ifreq, ipol]
                             nsamples_dset[blt_idx, :, freq_idx, pol_idx] = nsample_array[iblt, :, ifreq, ipol]
+
+            # append to history if desired
+            if add_to_history is not None:
+                history = np.string_(self.history) + np.string_(add_to_history)
+                if 'history' in f['Header']:
+                    # erase dataset first b/c it has fixed-length string datatype
+                    del f['Header']['history']
+                f['Header']['history'] = np.string_(history)
 
         return

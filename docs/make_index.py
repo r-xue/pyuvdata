@@ -25,31 +25,21 @@ def write_index_rst(readme_file=None, write_file=None):
 
     readme_md = pypandoc.convert_file(readme_file, 'md')
 
-    travis_str = 'https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata.svg'
-    regex_travis = re.compile(travis_str)
-    loc_travis_start = re.search(regex_travis, readme_md).start()
-    loc_travis_end = re.search(regex_travis, readme_md).end()
-    end_branch_str = r'\)\]'
-    regex_end = re.compile(end_branch_str)
-    loc_branch_end = re.search(regex_end, readme_md).start()
-    branch_str = readme_md[loc_travis_end:loc_branch_end]
-
-    cover_str = 'https://coveralls.io/repos/github/RadioAstronomySoftwareGroup/pyuvdata/badge.svg'
-    regex_cover = re.compile(cover_str)
-    loc_cover_start = re.search(regex_cover, readme_md).start()
-    loc_cover_end = re.search(regex_cover, readme_md).end()
-
     readme_text = pypandoc.convert_file(readme_file, 'rst')
 
-    rst_status_badge = '.. image:: ' + travis_str + branch_str + '\n    :target: https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata'
-    status_badge_text = '|Build Status|'
-    readme_text = readme_text.replace(status_badge_text, rst_status_badge + '\n\n')
+    title_badge_text = (
+        'pyuvdata\n========\n\n'
+        '.. image:: https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata.svg?branch=master\n'
+        '    :target: https://travis-ci.org/RadioAstronomySoftwareGroup/pyuvdata\n\n'
+        '.. image:: https://circleci.com/gh/RadioAstronomySoftwareGroup/pyuvdata.svg?style=svg\n'
+        '    :target: https://circleci.com/gh/RadioAstronomySoftwareGroup/pyuvdata\n\n'
+        '.. image:: https://codecov.io/gh/RadioAstronomySoftwareGroup/pyuvdata/branch/master/graph/badge.svg\n'
+        '  :target: https://codecov.io/gh/RadioAstronomySoftwareGroup/pyuvdata\n\n')
 
-    rst_status_badge = '.. image:: ' + cover_str + branch_str + '\n    :target: https://coveralls.io/github/RadioAstronomySoftwareGroup/pyuvdata' + branch_str
-    status_badge_text = '|Coverage Status|'
-    readme_text = readme_text.replace(status_badge_text, rst_status_badge)
+    begin_desc = 'pyuvdata defines a pythonic interface'
+    start_desc = str.find(readme_text, begin_desc)
 
-    readme_text = readme_text.replace(' ' + rst_status_badge, rst_status_badge)
+    readme_text = title_badge_text + readme_text[start_desc:]
 
     end_text = 'parameters descriptions'
     regex = re.compile(end_text.replace(' ', r'\s+'))
@@ -66,6 +56,7 @@ def write_index_rst(readme_file=None, write_file=None):
             '   uvcal\n'
             '   uvbeam_parameters\n'
             '   uvbeam\n'
+            '   cst_settings_yaml\n'
             '   developer_docs\n')
 
     out.replace(u"\u2018", "'").replace(u"\u2019", "'").replace(u"\xa0", " ")

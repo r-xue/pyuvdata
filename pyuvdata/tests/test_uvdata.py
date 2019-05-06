@@ -15,7 +15,7 @@ import six
 from astropy.time import Time
 from astropy.coordinates import Angle
 
-from pyuvdata import UVData
+from pyuvdata import UVData, UVCal
 import pyuvdata.utils as uvutils
 import pyuvdata.tests as uvtest
 from pyuvdata.data import DATA_PATH
@@ -79,31 +79,6 @@ class TestUVDataInit(object):
     def teardown(self):
         """Test teardown: delete object."""
         del(self.uv_object)
-
-    def test_order_pols(self):
-        test_uv1 = UVData()
-        testfile = os.path.join(
-            DATA_PATH, 'day2_TDEM0003_10s_norx_1src_1spw.uvfits')
-        uvtest.checkWarnings(test_uv1.read_uvfits, [testfile],
-                             message='Telescope EVLA is not')
-        test_uv1.order_pols(order='AIPS')
-        # check that we have aips ordering
-        aips_pols = np.array([-1, -2, -3, -4]).astype(int)
-        nt.assert_true(np.all(test_uv1.polarization_array == aips_pols))
-        test_uv2 = copy.deepcopy(test_uv1)
-        test_uv2.order_pols(order='CASA')
-        casa_pols = np.array([-1, -3, -4, -2]).astype(int)
-        nt.assert_true(np.all(test_uv2.polarization_array == casa_pols))
-        order = np.array([0, 2, 3, 1])
-        nt.assert_true(np.all(test_uv2.data_array == test_uv1.data_array[:, :, :, order]))
-        nt.assert_true(np.all(test_uv2.flag_array == test_uv1.flag_array[:, :, :, order]))
-        # check that we have casa ordering
-        test_uv2.order_pols(order='AIPS')
-        # check that we have aips ordering again
-        nt.assert_equal(test_uv1, test_uv2)
-        uvtest.checkWarnings(test_uv2.order_pols, ['unknown'], message='Invalid order supplied')
-        del(test_uv1)
-        del(test_uv2)
 
     def test_parameter_iter(self):
         "Test expected parameters."
@@ -1157,6 +1132,39 @@ def test_reorder_pols():
     uv2.reorder_pols()
     nt.assert_equal(uv1, uv2)
 
+    uv1.reorder_pols(order='AIPS')
+    # check that we have aips ordering
+    aips_pols = np.array([-1, -2, -3, -4]).astype(int)
+    nt.assert_true(np.all(uv1.polarization_array == aips_pols))
+
+    uv2 = copy.deepcopy(uv1)
+    uv2.reorder_pols(order='CASA')
+    # check that we have casa ordering
+    casa_pols = np.array([-1, -3, -4, -2]).astype(int)
+    nt.assert_true(np.all(uv2.polarization_array == casa_pols))
+    order = np.array([0, 2, 3, 1])
+    nt.assert_true(np.all(uv2.data_array == uv1.data_array[:, :, :, order]))
+    nt.assert_true(np.all(uv2.flag_array == uv1.flag_array[:, :, :, order]))
+
+    uv2.reorder_pols(order='AIPS')
+    # check that we have aips ordering again
+    nt.assert_equal(uv1, uv2)
+
+    # check error on unknown order
+    nt.assert_raises(ValueError, uv2.reorder_pols, {'order': 'foo'})
+
+    # check error if order is an array of the wrong length
+    with nt.assert_raises(ValueError) as cm:
+        uv2.reorder_pols(order=[3, 2, 1])
+    ex = cm.exception  # raised exception is available through exception property of context
+    nt.assert_true(ex.args[0].startswith('If order is an index array, it must'))
+
+    # check warning for order_pols:
+    uvtest.checkWarnings(uv2.order_pols, [], {'order': 'AIPS'},
+                         message=('order_pols method will soon be deprecated in '
+                                  'favor of reorder_pols'),
+                         category=PendingDeprecationWarning)
+
 
 def test_add():
     uv_full = UVData()
@@ -1609,6 +1617,260 @@ def test_break_add():
     uv2.select(freq_chans=np.arange(32, 64))
     uv2.integration_time *= 2
     nt.assert_raises(ValueError, uv1.__iadd__, uv2)
+
+
+def test_fast_concat():
+    uv_full = UVData()
+    testfile = os.path.join(DATA_PATH, 'day2_TDEM0003_10s_norx_1src_1spw.uvfits')
+    uvtest.checkWarnings(uv_full.read_uvfits, [testfile],
+                         message='Telescope EVLA is not')
+
+    # Add frequencies
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=np.arange(0, 32))
+    uv2.select(freq_chans=np.arange(32, 64))
+    uv1.fast_concat(uv2, 'freq', inplace=True)
+    # Check history is correct, before replacing and doing a full object check
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific frequencies using pyuvdata. '
+                                            'Combined data along frequency axis '
+                                            'using pyuvdata.', uv1.history))
+
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # Add frequencies - out of order
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=np.arange(0, 32))
+    uv2.select(freq_chans=np.arange(32, 64))
+    uvtest.checkWarnings(uv2.fast_concat, [uv1, 'freq'], {'inplace': True},
+                         message='Combined frequencies are not evenly spaced')
+    nt.assert_equal(uv2.Nfreqs, uv_full.Nfreqs)
+    nt.assert_true(uv2._freq_array != uv_full._freq_array)
+    nt.assert_true(uv2._data_array != uv_full._data_array)
+
+    # reorder frequencies and test that they are equal
+    index_array = np.argsort(uv2.freq_array[0, :])
+    uv2.freq_array = uv2.freq_array[:, index_array]
+    uv2.data_array = uv2.data_array[:, :, index_array, :]
+    uv2.nsample_array = uv2.nsample_array[:, :, index_array, :]
+    uv2.flag_array = uv2.flag_array[:, :, index_array, :]
+    uv2.history = uv_full.history
+    nt.assert_equal(uv2._freq_array, uv_full._freq_array)
+    nt.assert_equal(uv2, uv_full)
+
+    # Add polarizations
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(polarizations=uv1.polarization_array[0:2])
+    uv2.select(polarizations=uv2.polarization_array[2:4])
+    uv1.fast_concat(uv2, 'polarization', inplace=True)
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific polarizations using pyuvdata. '
+                                            'Combined data along polarization axis '
+                                            'using pyuvdata.', uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # Add polarizations - out of order
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(polarizations=uv1.polarization_array[0:2])
+    uv2.select(polarizations=uv2.polarization_array[2:4])
+    uvtest.checkWarnings(uv2.fast_concat, [uv1, 'polarization'], {'inplace': True},
+                         message='Combined polarizations are not evenly spaced')
+    nt.assert_true(uv2._polarization_array != uv_full._polarization_array)
+    nt.assert_true(uv2._data_array != uv_full._data_array)
+
+    # reorder pols
+    uv2.reorder_pols()
+    uv2.history = uv_full.history
+    nt.assert_equal(uv2, uv_full)
+
+    # Add times
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    times = np.unique(uv_full.time_array)
+    uv1.select(times=times[0:len(times) // 2])
+    uv2.select(times=times[len(times) // 2:])
+    uv1.fast_concat(uv2, 'blt', inplace=True)
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific times using pyuvdata. '
+                                            'Combined data along baseline-time axis '
+                                            'using pyuvdata.', uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # Add baselines
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    # divide in half to keep in order
+    ind1 = np.arange(uv1.Nblts // 2)
+    ind2 = np.arange(uv1.Nblts // 2, uv1.Nblts)
+    uv1.select(blt_inds=ind1)
+    uv2.select(blt_inds=ind2)
+    uv1.fast_concat(uv2, 'blt', inplace=True)
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific baseline-times using pyuvdata. '
+                                            'Combined data along baseline-time axis '
+                                            'using pyuvdata.', uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # Add baselines out of order
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    ant_list = list(range(15))  # Roughly half the antennas in the data
+    # All blts where ant_1 is in list
+    ind1 = [i for i in range(uv1.Nblts) if uv1.ant_1_array[i] in ant_list]
+    ind2 = [i for i in range(uv1.Nblts) if uv1.ant_1_array[i] not in ant_list]
+    uv1.select(blt_inds=ind1)
+    uv2.select(blt_inds=ind2)
+    uv1.fast_concat(uv2, 'blt', inplace=True)
+    nt.assert_true(uv2._ant_1_array != uv_full._ant_1_array)
+    nt.assert_true(uv2._ant_2_array != uv_full._ant_2_array)
+    nt.assert_true(uv2._uvw_array != uv_full._uvw_array)
+    nt.assert_true(uv2._time_array != uv_full._time_array)
+    nt.assert_true(uv2._baseline_array != uv_full._baseline_array)
+    nt.assert_true(uv2._data_array != uv_full._data_array)
+
+    # TODO: should reorder blts and test that they are equal once we have a blt reordering method
+
+    # add baselines such that Nants_data needs to change
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    ant_list = list(range(15))  # Roughly half the antennas in the data
+    # All blts where ant_1 is in list
+    ind1 = [i for i in range(uv1.Nblts) if uv1.ant_1_array[i] in ant_list]
+    ind2 = [i for i in range(uv1.Nblts) if uv1.ant_1_array[i] not in ant_list]
+    uv1.select(blt_inds=ind1)
+    uv2.select(blt_inds=ind2)
+    uv2.fast_concat(uv1, 'blt', inplace=True)
+
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific baseline-times using pyuvdata. '
+                                            'Combined data along baseline-time '
+                                            'axis using pyuvdata.', uv2.history))
+
+    # test freq & pol arrays equal
+    nt.assert_equal(uv2._freq_array, uv_full._freq_array)
+    nt.assert_equal(uv2._polarization_array, uv_full._polarization_array)
+
+    # test Nblt length arrays not equal but same shape
+    nt.assert_true(uv2._ant_1_array != uv_full._ant_1_array)
+    nt.assert_equal(uv2.ant_1_array.shape, uv_full.ant_1_array.shape)
+    nt.assert_true(uv2._ant_2_array != uv_full._ant_2_array)
+    nt.assert_equal(uv2.ant_2_array.shape, uv_full.ant_2_array.shape)
+    nt.assert_true(uv2._uvw_array != uv_full._uvw_array)
+    nt.assert_equal(uv2.uvw_array.shape, uv_full.uvw_array.shape)
+    nt.assert_true(uv2._time_array != uv_full._time_array)
+    nt.assert_equal(uv2.time_array.shape, uv_full.time_array.shape)
+    nt.assert_true(uv2._baseline_array != uv_full._baseline_array)
+    nt.assert_equal(uv2.baseline_array.shape, uv_full.baseline_array.shape)
+    nt.assert_true(uv2._data_array != uv_full._data_array)
+    nt.assert_equal(uv2.data_array.shape, uv_full.data_array.shape)
+
+    # Add multiple axes
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv_ref = copy.deepcopy(uv_full)
+    times = np.unique(uv_full.time_array)
+    uv1.select(times=times[0:len(times) // 2],
+               polarizations=uv1.polarization_array[0:2])
+    uv2.select(times=times[len(times) // 2:],
+               polarizations=uv2.polarization_array[2:4])
+    nt.assert_raises(ValueError, uv1.fast_concat, uv2, 'blt', inplace=True)
+
+    # Another combo
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv_ref = copy.deepcopy(uv_full)
+    times = np.unique(uv_full.time_array)
+    uv1.select(times=times[0:len(times) // 2], freq_chans=np.arange(0, 32))
+    uv2.select(times=times[len(times) // 2:], freq_chans=np.arange(32, 64))
+    nt.assert_raises(ValueError, uv1.fast_concat, uv2, 'blt', inplace=True)
+
+    # Add without inplace
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    times = np.unique(uv_full.time_array)
+    uv1.select(times=times[0:len(times) // 2])
+    uv2.select(times=times[len(times) // 2:])
+    uv1 = uv1.fast_concat(uv2, 'blt', inplace=False)
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific times using pyuvdata. '
+                                            'Combined data along baseline-time '
+                                            'axis using pyuvdata.', uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # Check warnings
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=np.arange(0, 32))
+    uv2.select(freq_chans=np.arange(33, 64))
+    uvtest.checkWarnings(uv1.fast_concat, [uv2, 'freq'],
+                         message='Combined frequencies are not evenly spaced')
+
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=[0])
+    uv2.select(freq_chans=[3])
+    uvtest.checkWarnings(uv1.fast_concat, [uv2, 'freq'],
+                         message='Combined frequencies are not contiguous')
+
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(polarizations=uv1.polarization_array[0:2])
+    uv2.select(polarizations=uv2.polarization_array[3])
+    uvtest.checkWarnings(uv1.fast_concat, [uv2, 'polarization'],
+                         message='Combined polarizations are not evenly spaced')
+
+    # Combining histories
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(polarizations=uv1.polarization_array[0:2])
+    uv2.select(polarizations=uv2.polarization_array[2:4])
+    uv2.history += ' testing the history. AIPS WTSCAL = 1.0'
+    uv1.fast_concat(uv2, 'polarization', inplace=True)
+    nt.assert_true(uvutils._check_histories(uv_full.history + '  Downselected to '
+                                            'specific polarizations using pyuvdata. '
+                                            'Combined data along polarization '
+                                            'axis using pyuvdata. testing the history.',
+                                            uv1.history))
+    uv1.history = uv_full.history
+    nt.assert_equal(uv1, uv_full)
+
+    # test add of autocorr-only and crosscorr-only objects
+    uv_full = UVData()
+    uv_full.read_miriad(os.path.join(DATA_PATH, 'zen.2457698.40355.xx.HH.uvcA'))
+    bls = uv_full.get_antpairs()
+    autos = [bl for bl in bls if bl[0] == bl[1]]
+    cross = sorted(set(bls) - set(autos))
+    uv_auto = uv_full.select(bls=autos, inplace=False)
+    uv_cross = uv_full.select(bls=cross, inplace=False)
+    uv1 = uv_auto.fast_concat(uv_cross, 'blt')
+    nt.assert_equal(uv1.Nbls, uv_auto.Nbls + uv_cross.Nbls)
+    uv2 = uv_cross.fast_concat(uv_auto, 'blt')
+    nt.assert_equal(uv2.Nbls, uv_auto.Nbls + uv_cross.Nbls)
+
+
+def test_fast_concat_errors():
+    uv_full = UVData()
+    testfile = os.path.join(DATA_PATH, 'day2_TDEM0003_10s_norx_1src_1spw.uvfits')
+    uvtest.checkWarnings(uv_full.read_uvfits, [testfile],
+                         message='Telescope EVLA is not')
+
+    uv1 = copy.deepcopy(uv_full)
+    uv2 = copy.deepcopy(uv_full)
+    uv1.select(freq_chans=np.arange(0, 32))
+    uv2.select(freq_chans=np.arange(32, 64))
+    nt.assert_raises(ValueError, uv1.fast_concat, uv2, 'foo', inplace=True)
+
+    cal = UVCal()
+    nt.assert_raises(ValueError, uv1.fast_concat, cal, 'freq', inplace=True)
 
 
 def test_key2inds():
@@ -2215,7 +2477,48 @@ def test_get_pols():
                          message='Telescope EVLA is not')
     pols = uv.get_pols()
     pols_data = ['rr', 'll', 'lr', 'rl']
-    nt.assert_count_equal(pols, pols_data)
+    nt.assert_equal(sorted(pols), sorted(pols_data))
+
+
+def test_get_pols_x_orientation():
+    miriad_file = os.path.join(DATA_PATH, 'zen.2456865.60537.xy.uvcRREAA')
+    uv_in = UVData()
+    uvtest.checkWarnings(uv_in.read, [miriad_file], known_warning='miriad')
+
+    uv_in.x_orientation = 'east'
+
+    pols = uv_in.get_pols()
+    pols_data = ['en']
+    nt.assert_equal(pols, pols_data)
+
+    uv_in.x_orientation = 'north'
+
+    pols = uv_in.get_pols()
+    pols_data = ['ne']
+    nt.assert_equal(pols, pols_data)
+
+
+def test_deprecated_x_orientation():
+    miriad_file = os.path.join(DATA_PATH, 'zen.2456865.60537.xy.uvcRREAA')
+    uv_in = UVData()
+    uvtest.checkWarnings(uv_in.read, [miriad_file], known_warning='miriad')
+
+    uv_in.x_orientation = 'e'
+
+    uvtest.checkWarnings(uv_in.check, category=PendingDeprecationWarning,
+                         message=['x_orientation e is not one of [east, north], '
+                                  'converting to "east".'])
+
+    uv_in.x_orientation = 'N'
+    uvtest.checkWarnings(uv_in.check, category=PendingDeprecationWarning,
+                         message=['x_orientation N is not one of [east, north], '
+                                  'converting to "north".'])
+
+    uv_in.x_orientation = 'foo'
+    nt.assert_raises(ValueError, uvtest.checkWarnings, uv_in.check,
+                     category=PendingDeprecationWarning,
+                     message=['x_orientation n is not one of [east, north], '
+                              'cannot be converted.'])
 
 
 def test_get_feedpols():
@@ -2227,7 +2530,7 @@ def test_get_feedpols():
                          message='Telescope EVLA is not')
     pols = uv.get_feedpols()
     pols_data = ['r', 'l']
-    nt.assert_count_equal(pols, pols_data)
+    nt.assert_equal(sorted(pols), sorted(pols_data))
 
     # Test break when pseudo-Stokes visibilities are present
     uv.polarization_array[0] = 1  # pseudo-Stokes I
@@ -2762,7 +3065,7 @@ def test_redundancy_contract_expand():
     # and restored to its original form.
 
     uv0 = UVData()
-    uv0.read_uvh5(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvh5'))
+    uv0.read_uvfits(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvfits'))
     tol = 0.02   # Fails at lower precision because some baselines falling into multiple redundant groups
 
     # Assign identical data to each redundant group:
@@ -2802,7 +3105,7 @@ def test_redundancy_contract_expand():
 
 def test_compress_redundancy_metadata_only():
     uv0 = UVData()
-    uv0.read_uvh5(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvh5'))
+    uv0.read_uvfits(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvfits'))
     tol = 0.01
 
     # Assign identical data to each redundant group:
@@ -2832,18 +3135,18 @@ def test_redundancy_missing_groups():
     # raise the right warnings and fill only what data are available.
 
     uv0 = UVData()
-    uv0.read_uvh5(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvh5'))
+    uv0.read_uvfits(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvfits'))
     tol = 0.02
     Nselect = 19
 
     uv0.compress_by_redundancy(tol=tol)
-    fname = 'temp_hera19_missingreds.uvh5'
+    fname = 'temp_hera19_missingreds.uvfits'
 
     bls = np.unique(uv0.baseline_array)[:Nselect]         # First twenty baseline groups
     uv0.select(bls=[uv0.baseline_to_antnums(bl) for bl in bls])
-    uv0.write_uvh5(fname)
+    uv0.write_uvfits(fname)
     uv1 = UVData()
-    uv1.read_uvh5(fname)
+    uv1.read_uvfits(fname)
     os.remove(fname)
 
     nt.assert_equal(uv0, uv1)  # Check that writing compressed files causes no issues.
@@ -2865,7 +3168,7 @@ def test_redundancy_missing_groups():
 def test_quick_redundant_vs_redundant_test_array():
     """Verify the quick redundancy calc returns the same groups as a known array."""
     uv = UVData()
-    uv.read_uvh5(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvh5'))
+    uv.read_uvfits(os.path.join(DATA_PATH, 'fewant_randsrc_airybeam_Nsrc100_10MHz.uvfits'))
     uv.select(times=uv.time_array[0])
     uv.unphase_to_drift()
     uv._set_u_positive()
@@ -2936,3 +3239,68 @@ def test_redundancy_finder_when_nblts_not_nbls_times_ntimes():
     redundant_groups, centers, lengths, conj_inds = uv.get_baseline_redundancies(tol=tol)
     redundant_groups.sort(key=len)
     nt.assert_equal(groups, redundant_groups)
+
+
+def test_overlapping_data_add():
+    # read in test data
+    uv = UVData()
+    testfile = os.path.join(DATA_PATH, 'day2_TDEM0003_10s_norx_1src_1spw.uvfits')
+    uvtest.checkWarnings(uv.read_uvfits, [testfile], message='Telescope EVLA is not')
+
+    # slice into four objects
+    blts1 = np.arange(500)
+    blts2 = np.arange(500, 1360)
+    uv1 = uv.select(polarizations=[-1, -2], blt_inds=blts1, inplace=False)
+    uv2 = uv.select(polarizations=[-3, -4], blt_inds=blts1, inplace=False)
+    uv3 = uv.select(polarizations=[-1, -2], blt_inds=blts2, inplace=False)
+    uv4 = uv.select(polarizations=[-3, -4], blt_inds=blts2, inplace=False)
+
+    # combine and check for equality
+    uvfull = uv1 + uv2
+    uvfull += uv3
+    uvfull += uv4
+    extra_history = ("Downselected to specific baseline-times, polarizations using pyuvdata. "
+                     "Combined data along polarization axis using pyuvdata. Combined data along "
+                     "baseline-time axis using pyuvdata. Overwrote invalid data using pyuvdata.")
+    nt.assert_true(uvutils._check_histories(uvfull.history, uv.history + extra_history))
+    uvfull.history = uv.history  # make histories match
+    nt.assert_equal(uv, uvfull)
+
+    # check combination not-in-place
+    uvfull = uv1 + uv2
+    uvfull += uv3
+    uvfull = uvfull + uv4
+    uvfull.history = uv.history  # make histories match
+    nt.assert_equal(uv, uvfull)
+
+    # test raising error for adding objects incorrectly (i.e., having the object
+    # with data to be overwritten come second)
+    uvfull = uv1 + uv2
+    uvfull += uv3
+    nt.assert_raises(ValueError, uv4.__iadd__, uvfull)
+    nt.assert_raises(ValueError, uv4.__add__, uv4, uvfull)
+
+    # write individual objects out, and make sure that we can read in the list
+    uv1_out = os.path.join(DATA_PATH, "uv1.uvfits")
+    uv1.write_uvfits(uv1_out)
+    uv2_out = os.path.join(DATA_PATH, "uv2.uvfits")
+    uv2.write_uvfits(uv2_out)
+    uv3_out = os.path.join(DATA_PATH, "uv3.uvfits")
+    uv3.write_uvfits(uv3_out)
+    uv4_out = os.path.join(DATA_PATH, "uv4.uvfits")
+    uv4.write_uvfits(uv4_out)
+
+    uvfull = UVData()
+    uvtest.checkWarnings(uvfull.read, [[uv1_out, uv2_out, uv3_out, uv4_out]],
+                         nwarnings=4, message='Telescope EVLA is not')
+    nt.assert_true(uvutils._check_histories(uvfull.history, uv.history + extra_history))
+    uvfull.history = uv.history  # make histories match
+    nt.assert_true(uvfull, uv)
+
+    # clean up after ourselves
+    os.remove(uv1_out)
+    os.remove(uv2_out)
+    os.remove(uv3_out)
+    os.remove(uv4_out)
+
+    return

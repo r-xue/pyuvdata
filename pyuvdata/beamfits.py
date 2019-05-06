@@ -168,7 +168,9 @@ class BeamFITS(UVBeam):
             self.feed_version = primary_header.pop('FEEDVER', None)
             self.model_name = primary_header.pop('MODEL', None)
             self.model_version = primary_header.pop('MODELVER', None)
+            self.x_orientation = primary_header.pop('XORIENT', None)
             self.interpolation_function = primary_header.pop('INTERPFN', None)
+            self.freq_interp_kind = primary_header.pop('FINTERP', None)
 
             # shapes
             if primary_header.pop('CTYPE' + str(ax_nums['freq'])).lower().strip() == 'freq':
@@ -293,8 +295,7 @@ class BeamFITS(UVBeam):
             if 'BANDPARM' in hdunames:
                 bandpass_hdu = F[hdunames['BANDPARM']]
                 bandpass_header = bandpass_hdu.header.copy()
-                self.reference_input_impedance = bandpass_header.pop('refzin', None)
-                self.reference_output_impedance = bandpass_header.pop('refzout', None)
+                self.reference_impedance = bandpass_header.pop('ref_imp', None)
 
                 freq_data = bandpass_hdu.data
                 columns = [c.name for c in freq_data.columns]
@@ -408,8 +409,16 @@ class BeamFITS(UVBeam):
         primary_header['MODEL'] = self.model_name
         primary_header['MODELVER'] = self.model_version
 
+        if self.x_orientation is not None:
+            primary_header['XORIENT'] = self.x_orientation
+
         if self.interpolation_function is not None:
-            primary_header['INTERPFN'] = self.interpolation_function
+            primary_header['INTERPFN'] = (self.interpolation_function,
+                                          'interpolation function')
+
+        if self.freq_interp_kind is not None:
+            primary_header['FINTERP'] = (self.freq_interp_kind, 'frequency '
+                                         'interpolation kind (scipy interp1d)')
 
         if self.beam_type == 'efield':
             primary_header['FEEDLIST'] = '[' + ', '.join(self.feed_array) + ']'
@@ -637,10 +646,8 @@ class BeamFITS(UVBeam):
         coldefs = fits.ColDefs(col_list)
         bandpass_hdu = fits.BinTableHDU.from_columns(coldefs)
         bandpass_hdu.header['EXTNAME'] = 'BANDPARM'
-        if self.reference_input_impedance is not None:
-            bandpass_hdu.header['refzin'] = self.reference_input_impedance
-        if self.reference_output_impedance is not None:
-            bandpass_hdu.header['refzout'] = self.reference_output_impedance
+        if self.reference_impedance is not None:
+            bandpass_hdu.header['ref_imp'] = self.reference_impedance
         hdulist.append(bandpass_hdu)
 
         hdulist.writeto(filename, overwrite=clobber)

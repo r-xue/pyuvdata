@@ -187,9 +187,12 @@ class Miriad(UVData):
             # type check
             err_msg = "pols must be a list of polarization strings or ints, Ex: ['xx', ...] or [-5, ...]"
             assert isinstance(polarizations, (list, np.ndarray)), err_msg
-            assert np.array(map(lambda p: isinstance(p, (str, np.str, int, np.integer)), polarizations)).all(), err_msg
+            assert np.array(map(lambda p: isinstance(p, (str, np.str, int, np.integer)),
+                                polarizations)).all(), err_msg
             # convert to pol integer if string
-            polarizations = [p if isinstance(p, (int, np.integer)) else uvutils.polstr2num(p) for p in polarizations]
+            polarizations = [p if isinstance(p, (int, np.integer))
+                             else uvutils.polstr2num(p, x_orientation=self.x_orientation)
+                             for p in polarizations]
             # iterate through all possible pols and reject if not in pols
             pol_list = []
             for p in np.arange(-8, 5):
@@ -240,7 +243,7 @@ class Miriad(UVData):
                 _source = source
 
             # check extra variables for changes compared with initial value
-            for extra_variable in check_variables.keys():
+            for extra_variable in list(check_variables.keys()):
                 if type(check_variables[extra_variable]) == str:
                     if uv[extra_variable] != check_variables[extra_variable]:
                         check_variables.pop(extra_variable)
@@ -534,7 +537,7 @@ class Miriad(UVData):
             run_check_acceptability: Option to check acceptable range of the values of
                 parameters before writing the file. Default is True.
             clobber: Option to overwrite the filename if the file already exists.
-                Default is False.
+                Default is False. If False and file exists, raises an IOError.
             no_antnums: Option to not write the antnums variable to the file.
                 Should only be used for testing purposes.
         """
@@ -557,7 +560,7 @@ class Miriad(UVData):
                 print('File exists: clobbering')
                 shutil.rmtree(filepath)
             else:
-                raise ValueError('File exists: skipping')
+                raise IOError('File exists: skipping')
 
         if self.Nfreqs > 1:
             freq_spacing = self.freq_array[0, 1:] - self.freq_array[0, :-1]

@@ -45,8 +45,10 @@ class CSTBeam(UVBeam):
 
     def read_cst_beam(self, filename, beam_type='power', feed_pol='x',
                       rotate_pol=True, frequency=None, telescope_name=None,
-                      feed_name=None, feed_version=None, model_name=None, model_version=None,
-                      history='', run_check=True, check_extra=True, run_check_acceptability=True):
+                      feed_name=None, feed_version=None, model_name=None,
+                      model_version=None, history='', x_orientation=None,
+                      reference_impedance=None, extra_keywords=None,
+                      run_check=True, check_extra=True, run_check_acceptability=True):
 
         """
         Read in data from a cst file.
@@ -67,6 +69,11 @@ class CSTBeam(UVBeam):
             model_name: the name of the model corresponding to the filename.
             model_version: the version of the model corresponding to the filename.
             history: A string detailing the history of the filename.
+            x_orientation: Orientation of the physical dipole corresponding to what is
+                labelled as the x polarization. Options are "east" (indicating
+                east/west orientation) and "north" (indicating north/south orientation)
+            reference_impedance (float): The reference impedance of the model(s).
+            extra_keywords (dict): a dictionary containing any extra_keywords.
             run_check: Option to check for the existence and proper shapes of
                 required parameters after reading in the file. Default is True.
             check_extra: Option to check optional parameters as well as required
@@ -83,12 +90,19 @@ class CSTBeam(UVBeam):
         if not uvutils._check_history_version(self.history, self.pyuvdata_version_str):
             self.history += self.pyuvdata_version_str
 
-        if beam_type is 'power':
+        if x_orientation is not None:
+            self.x_orientation = x_orientation
+        if reference_impedance is not None:
+            self.reference_impedance = float(reference_impedance)
+        if extra_keywords is not None:
+            self.extra_keywords = extra_keywords
+
+        if beam_type == 'power':
             self.Naxes_vec = 1
 
-            if feed_pol is 'x':
+            if feed_pol == 'x':
                 feed_pol = 'xx'
-            elif feed_pol is 'y':
+            elif feed_pol == 'y':
                 feed_pol = 'yy'
 
             if rotate_pol:
@@ -105,12 +119,12 @@ class CSTBeam(UVBeam):
             self.Naxes_vec = 2
             self.Ncomponents_vec = 2
             if rotate_pol:
-                if feed_pol is 'x':
+                if feed_pol == 'x':
                     self.feed_array = np.array(['x', 'y'])
                 else:
                     self.feed_array = np.array(['y', 'x'])
             else:
-                if feed_pol is 'x':
+                if feed_pol == 'x':
                     self.feed_array = np.array(['x'])
                 else:
                     self.feed_array = np.array(['y'])
@@ -201,8 +215,19 @@ class CSTBeam(UVBeam):
             rot_theta = theta_data
 
         # get beam
-        if self.beam_type is 'power':
-            data_col = np.where(np.array(column_names) == 'abs(v)')[0][0]
+        if self.beam_type == 'power':
+
+            data_col_enum = ['abs(e)', 'abs(v)']
+            data_col = []
+            for name in data_col_enum:
+                this_col = np.where(np.array(column_names) == name)[0]
+                if this_col.size > 0:
+                    data_col = data_col + this_col.tolist()
+            if len(data_col) == 0:
+                raise ValueError('No power column found in file: {f}'.format(f=filename))
+            elif len(data_col) > 1:
+                raise ValueError('Multiple possible power columns found in file: {f}'.format(f=filename))
+            data_col = data_col[0]
             power_beam1 = data[:, data_col].reshape((theta_axis.size, phi_axis.size), order='F') ** 2.
 
             self.data_array[0, 0, 0, 0, :, :] = power_beam1

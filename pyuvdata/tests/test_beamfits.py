@@ -18,7 +18,8 @@ from pyuvdata.data import DATA_PATH
 import pyuvdata.utils as uvutils
 
 filenames = ['HERA_NicCST_150MHz.txt', 'HERA_NicCST_123MHz.txt']
-cst_files = [os.path.join(DATA_PATH, f) for f in filenames]
+cst_folder = 'NicCSTbeams'
+cst_files = [os.path.join(DATA_PATH, cst_folder, f) for f in filenames]
 
 
 def test_readCST_writereadFITS():
@@ -32,12 +33,14 @@ def test_readCST_writereadFITS():
 
     # add optional parameters for testing purposes
     beam_in.extra_keywords = {'KEY1': 'test_keyword'}
-    beam_in.reference_input_impedance = 340.
-    beam_in.reference_output_impedance = 50.
+    beam_in.x_orientation = 'east'
+    beam_in.reference_impedance = 340.
     beam_in.receiver_temperature_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.loss_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.mismatch_array = np.random.normal(0.0, 1.0, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.s_parameters = np.random.normal(0.0, 0.3, size=(4, beam_in.Nspws, beam_in.Nfreqs))
+    beam_in.interpolation_function = 'az_za_simple'
+    beam_in.freq_interp_kind = 'linear'
 
     write_file = os.path.join(DATA_PATH, 'test/outtest_beam.fits')
 
@@ -59,8 +62,8 @@ def test_readCST_writereadFITS():
 
     # add optional parameters for testing purposes
     beam_in.extra_keywords = {'KEY1': 'test_keyword'}
-    beam_in.reference_input_impedance = 340.
-    beam_in.reference_output_impedance = 50.
+    beam_in.x_orientation = 'east'
+    beam_in.reference_impedance = 340.
     beam_in.receiver_temperature_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.loss_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.mismatch_array = np.random.normal(0.0, 1.0, size=(beam_in.Nspws, beam_in.Nfreqs))
@@ -154,8 +157,8 @@ def test_writeread_healpix():
 
     # add optional parameters for testing purposes
     beam_in.extra_keywords = {'KEY1': 'test_keyword'}
-    beam_in.reference_input_impedance = 340.
-    beam_in.reference_output_impedance = 50.
+    beam_in.x_orientation = 'east'
+    beam_in.reference_impedance = 340.
     beam_in.receiver_temperature_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.loss_array = np.random.normal(50.0, 5, size=(beam_in.Nspws, beam_in.Nfreqs))
     beam_in.mismatch_array = np.random.normal(0.0, 1.0, size=(beam_in.Nspws, beam_in.Nfreqs))
@@ -522,8 +525,8 @@ def test_multi_files():
 
     # add optional parameters for testing purposes
     beam_full.extra_keywords = {'KEY1': 'test_keyword'}
-    beam_full.reference_input_impedance = 340.
-    beam_full.reference_output_impedance = 50.
+    beam_full.x_orientation = 'east'
+    beam_full.reference_impedance = 340.
     beam_full.receiver_temperature_array = np.random.normal(50.0, 5, size=(beam_full.Nspws, beam_full.Nfreqs))
     beam_full.loss_array = np.random.normal(50.0, 5, size=(beam_full.Nspws, beam_full.Nfreqs))
     beam_full.mismatch_array = np.random.normal(0.0, 1.0, size=(beam_full.Nspws, beam_full.Nfreqs))
